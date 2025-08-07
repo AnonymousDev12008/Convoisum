@@ -104,7 +104,7 @@ Host (h), Join (j), Quit (q):
 
 4. Clone your repository or transfer your scripts to Termux home.
 
-   git clone https://github.com/Anonymous Dev12008/Ephemeral-chat.git
+git clone https://github.com/AnonymousDev12008/Ephemeral-chat.git
 
 
 5. Make sure Tor is running (the script will start and manage Tor automatically, but you can also run it manually with `tor &`).
@@ -151,5 +151,6 @@ Feel free to contact the maintainer or open issues/pull requests on the Git repo
 
 
    
+
 
 
