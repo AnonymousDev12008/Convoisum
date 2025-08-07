@@ -1,4 +1,4 @@
-# ephemeral Tor Chat
+# Ephemeral Tor Chat
 
 A **privacy-focused, ephemeral, peer-to-peer chat application** running over Tor hidden services.  
 It uses fresh ephemeral cryptographic keys for every session, routes traffic anonymously via Tor, and destroys all data on exit. Perfect for secure, anonymous, and temporary chat sessions.
@@ -151,3 +151,4 @@ Feel free to contact the maintainer or open issues/pull requests on the Git repo
 
 
    
+
