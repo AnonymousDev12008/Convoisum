@@ -94,29 +94,32 @@ Host (h), Join (j), Quit (q):
 
 2. Update packages:
 
-   pkg update && pkg upgrade
+   `pkg update && pkg upgrade`
 
 3. Install dependencies:
 
-   pkg install python tor git
-   pip install cryptography PySocks
+  ` pkg install python tor git`
+   `pip install cryptography PySocks`
 
 
 4. Clone your repository or transfer your scripts to Termux home.
 
-git clone https://github.com/AnonymousDev12008/Ephemeral-chat.git
+`git clone https://github.com/AnonymousDev12008/Ephemeral-chat.git`
 
 
 5. Make sure Tor is running (the script will start and manage Tor automatically, but you can also run it manually with `tor &`).
 
-6. Run the chat app:
+6. Run the chat app once after getting into the repos directory using the following command
+
+   `cd Ephemeral-chat`
+7. Now you can run the chat application by using the command
+
+   `python ephemeral.py`
   
-   python ephemeral.py
 
+8. Use the same menu-based workflow as desktop.
 
-7. Use the same menu-based workflow as desktop.
-
-8. **Note:** Closing the Termux session will stop all running processes, including Tor and your chat session, ensuring ephemeral cleanup.
+9. **Note:** Closing the Termux session will stop all running processes, including Tor and your chat session, ensuring ephemeral cleanup.
 
 ## Cleanup
 
@@ -151,6 +154,7 @@ Feel free to contact the maintainer or open issues/pull requests on the Git repo
 
 
    
+
 
 
 
