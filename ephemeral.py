@@ -19,6 +19,9 @@ from crypto_core import (
     decrypt_message,
 )
 
+# Import PEM loader from cryptography
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
 TOR_SOCKS_ADDR = "127.0.0.1"
 TOR_SOCKS_PORT = 9050
 
@@ -135,7 +138,9 @@ def run_host():
         peer_pem = "".join(peer_lines).encode()
 
         try:
-            session_key = derive_shared_key(private_key, peer_pem)
+            # Properly load PEM into public key object before key derivation
+            peer_public_key = load_pem_public_key(peer_pem)
+            session_key = derive_shared_key(private_key, peer_public_key)
         except Exception as e:
             print(f"[!] Failed to derive session key: {e}")
             return
@@ -208,7 +213,9 @@ def run_client():
     peer_pem = "".join(peer_lines).encode()
 
     try:
-        session_key = derive_shared_key(private_key, peer_pem)
+        # Properly load PEM into public key object before key derivation
+        peer_public_key = load_pem_public_key(peer_pem)
+        session_key = derive_shared_key(private_key, peer_public_key)
     except Exception as e:
         print(f"[!] Failed to derive session key: {e}")
         return
