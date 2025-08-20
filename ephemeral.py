@@ -115,6 +115,8 @@ HiddenServiceVersion 3
             with open(onion_path, "r") as f:
                 onion_addr = f.read().strip()
             print(f"[*] Hidden service ready: {onion_addr} (port {local_port})")
+            # Tiny grace delay to allow HS to fully publish
+            time.sleep(1.0)
             return tor_proc, onion_addr, temp_dir
         time.sleep(1)
 
@@ -187,6 +189,7 @@ def run_host():
         print("[!] Failed to start Tor. Returning to main menu.")
         return
 
+    listener = None
     try:
         private_key, public_key = generate_keys()
         nonce_counter = NonceCounter()
@@ -211,66 +214,71 @@ def run_host():
             print("[!] Returning to main menu.")
             return
 
-        try:
-            # Canonicalize keys and normalize onion/port
-            host_der = canonical_pubkey_bytes(public_key)
-            client_der = canonical_pubkey_bytes(peer_public_key)
-            onion_norm = onion_addr.strip().lower().encode("ascii")
-            port_norm = int(local_port).to_bytes(2, "big")
+        # Canonicalize keys and normalize onion/port
+        host_der = canonical_pubkey_bytes(public_key)
+        client_der = canonical_pubkey_bytes(peer_public_key)
+        onion_norm = onion_addr.strip().lower().encode("ascii")
+        port_norm = int(local_port).to_bytes(2, "big")
 
-            # Fixed order: host + client + onion + port
-            transcript = host_der + client_der + onion_norm + port_norm
+        # Fixed order: host + client + onion + port
+        transcript = host_der + client_der + onion_norm + port_norm
 
-            session_key = derive_shared_key_with_context(private_key, peer_public_key, transcript)
-            sas = derive_sas(session_key, transcript)
+        session_key = derive_shared_key_with_context(private_key, peer_public_key, transcript)
+        sas = derive_sas(session_key, transcript)
 
-            print("\n" + "=" * 50)
-            print("*** SECURITY VERIFICATION REQUIRED ***")
-            print("=" * 50)
-            print(f"Verification code: {sas}")
-            print("\nIMPORTANT: Compare this code with your peer over voice/video call.")
-            print("This prevents man-in-the-middle attacks.")
-            print("=" * 50)
+        # Create listener BEFORE prompting SAS so it's ready when client dials
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", local_port))
+        listener.listen(1)
+        listener.settimeout(300)  # 5 minutes
 
-            while True:
-                confirmed = input("\nDoes your peer confirm this EXACT code? (yes/no): ").strip().lower()
-                if confirmed == "yes":
-                    break
-                elif confirmed == "no":
-                    print("\n" + "!" * 50)
-                    print("!!! SECURITY ALERT: Verification FAILED !!!")
-                    print("!!! POSSIBLE MAN-IN-THE-MIDDLE ATTACK !!!")
-                    print("!!! DO NOT PROCEED WITH CHAT !!!")
-                    print("!!! Returning to main menu. !!!")
-                    print("!" * 50)
-                    return
-                else:
-                    print("Please enter 'yes' or 'no'")
+        # Small grace pause (in addition to HS grace) to ensure readiness
+        time.sleep(1.0)
 
-        except Exception as e:
-            print(f"[!] Failed to derive session key: {e}")
-            print("[!] Returning to main menu.")
-            return
+        print("\n" + "=" * 50)
+        print("*** SECURITY VERIFICATION REQUIRED ***")
+        print("=" * 50)
+        print(f"Verification code: {sas}")
+        print("\nIMPORTANT: Compare this code with your peer over voice/video call.")
+        print("This prevents man-in-the-middle attacks.")
+        print("=" * 50)
+
+        while True:
+            confirmed = input("\nDoes your peer confirm this EXACT code? (yes/no): ").strip().lower()
+            if confirmed == "yes":
+                break
+            elif confirmed == "no":
+                print("\n" + "!" * 50)
+                print("!!! SECURITY ALERT: Verification FAILED !!!")
+                print("!!! POSSIBLE MAN-IN-THE-MIDDLE ATTACK !!!")
+                print("!!! DO NOT PROCEED WITH CHAT !!!")
+                print("!!! Returning to main menu. !!!")
+                print("!" * 50)
+                return
+            else:
+                print("Please enter 'yes' or 'no'")
 
         print("\n[*] Security verification passed!")
         print("[*] Session key derived. Waiting for a connection...\n")
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", local_port))
-            s.listen(1)
-            s.settimeout(300)
-            try:
-                conn, addr = s.accept()
-            except socket.timeout:
-                print("[!] Timeout waiting for connection. Returning to main menu.")
-                return
+        try:
+            conn, addr = listener.accept()
+        except socket.timeout:
+            print("[!] Timeout waiting for connection. Returning to main menu.")
+            return
 
-            with conn:
-                print(f"[*] Peer connected from {addr}")
-                handle_client(conn, session_key, nonce_counter)
+        with conn:
+            print(f"[*] Peer connected from {addr}")
+            handle_client(conn, session_key, nonce_counter)
 
     finally:
         print("\n[*] Cleaning up...")
+        try:
+            if listener:
+                listener.close()
+        except Exception:
+            pass
         if tor_proc:
             tor_proc.terminate()
             tor_proc.wait()
@@ -338,46 +346,45 @@ def run_client():
         print("[!] Returning to main menu.")
         return
 
+    # Canonicalize keys and normalize onion/port
+    host_der = canonical_pubkey_bytes(peer_public_key)
+    client_der = canonical_pubkey_bytes(public_key)
+    onion_norm = onion_addr.strip().lower().encode("ascii")
+    port_norm = int(port).to_bytes(2, "big")
+
+    # Fixed order: host + client + onion + port
+    transcript = host_der + client_der + onion_norm + port_norm
+
     try:
-        # Canonicalize keys and normalize onion/port
-        host_der = canonical_pubkey_bytes(peer_public_key)
-        client_der = canonical_pubkey_bytes(public_key)
-        onion_norm = onion_addr.strip().lower().encode("ascii")
-        port_norm = int(port).to_bytes(2, "big")
-
-        # Fixed order: host + client + onion + port
-        transcript = host_der + client_der + onion_norm + port_norm
-
         session_key = derive_shared_key_with_context(private_key, peer_public_key, transcript)
         sas = derive_sas(session_key, transcript)
-
-        print("\n" + "=" * 50)
-        print("*** SECURITY VERIFICATION REQUIRED ***")
-        print("=" * 50)
-        print(f"Verification code: {sas}")
-        print("\nIMPORTANT: Compare this code with the host over voice/video call.")
-        print("This prevents man-in-the-middle attacks.")
-        print("=" * 50)
-
-        while True:
-            confirmed = input("\nDoes the host confirm this EXACT code? (yes/no): ").strip().lower()
-            if confirmed == "yes":
-                break
-            elif confirmed == "no":
-                print("\n" + "!" * 50)
-                print("!!! SECURITY ALERT: Verification FAILED !!!")
-                print("!!! POSSIBLE MAN-IN-THE-MIDDLE ATTACK !!!")
-                print("!!! DO NOT PROCEED WITH CHAT !!!")
-                print("!!! Returning to main menu. !!!")
-                print("!" * 50)
-                return
-            else:
-                print("Please enter 'yes' or 'no'")
-
     except Exception as e:
         print(f"[!] Failed to derive session key: {e}")
         print("[!] Returning to main menu.")
         return
+
+    print("\n" + "=" * 50)
+    print("*** SECURITY VERIFICATION REQUIRED ***")
+    print("=" * 50)
+    print(f"Verification code: {sas}")
+    print("\nIMPORTANT: Compare this code with the host over voice/video call.")
+    print("This prevents man-in-the-middle attacks.")
+    print("=" * 50)
+
+    while True:
+        confirmed = input("\nDoes the host confirm this EXACT code? (yes/no): ").strip().lower()
+        if confirmed == "yes":
+            break
+        elif confirmed == "no":
+            print("\n" + "!" * 50)
+            print("!!! SECURITY ALERT: Verification FAILED !!!")
+            print("!!! POSSIBLE MAN-IN-THE-MIDDLE ATTACK !!!")
+            print("!!! DO NOT PROCEED WITH CHAT !!!")
+            print("!!! Returning to main menu. !!!")
+            print("!" * 50)
+            return
+        else:
+            print("Please enter 'yes' or 'no'")
 
     print("\n[*] Security verification passed!")
     print("[*] Session key derived. Connecting...\n")
@@ -386,13 +393,19 @@ def run_client():
     s.set_proxy(socks.SOCKS5, TOR_SOCKS_ADDR, TOR_SOCKS_PORT)
     s.settimeout(30)
 
-    try:
-        s.connect((onion_addr, port))
-        print("[*] Connected to host!")
-    except Exception as e:
-        print(f"[!] Failed to connect to {onion_addr}:{port} via Tor: {e}")
-        print("[!] Returning to main menu.")
-        return
+    # Retry loop to handle Tor propagation / race conditions
+    max_tries = 10
+    for attempt in range(1, max_tries + 1):
+        try:
+            s.connect((onion_addr, port))
+            print("[*] Connected to host!")
+            break
+        except Exception as e:
+            if attempt == max_tries:
+                print(f"[!] Failed to connect after {max_tries} tries: {e}")
+                print("[!] Returning to main menu.")
+                return
+            time.sleep(1.0)
 
     stop_flag = threading.Event()
     t = threading.Thread(target=receive_loop, args=(s, session_key, stop_flag), daemon=True)
