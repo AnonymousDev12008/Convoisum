@@ -7,7 +7,6 @@ import subprocess
 import time
 import random
 import shutil
-import hashlib
 
 import socks
 
@@ -177,7 +176,10 @@ def handle_client(conn, session_key, nonce_counter):
             stop_flag.set()
             break
 
-    conn.close()
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 def run_host():
     print("====== ephemeral chat: HOST mode ======")
@@ -233,7 +235,7 @@ def run_host():
         listener.listen(1)
         listener.settimeout(300)  # 5 minutes
 
-        # Small grace pause (in addition to HS grace) to ensure readiness
+        # Small grace pause to ensure readiness
         time.sleep(1.0)
 
         print("\n" + "=" * 50)
@@ -389,26 +391,33 @@ def run_client():
     print("\n[*] Security verification passed!")
     print("[*] Session key derived. Connecting...\n")
 
-    s = socks.socksocket()
-    s.set_proxy(socks.SOCKS5, TOR_SOCKS_ADDR, TOR_SOCKS_PORT)
-    s.settimeout(30)
-
-    # Retry loop to handle Tor propagation / race conditions
+    # Retry with fresh SOCKS socket per attempt to avoid Bad file descriptor
+    connected_sock = None
     max_tries = 10
+    last_error = None
     for attempt in range(1, max_tries + 1):
         try:
+            s = socks.socksocket()
+            s.set_proxy(socks.SOCKS5, TOR_SOCKS_ADDR, TOR_SOCKS_PORT)
+            s.settimeout(30)
             s.connect((onion_addr, port))
+            connected_sock = s
             print("[*] Connected to host!")
             break
         except Exception as e:
+            last_error = e
+            try:
+                s.close()
+            except Exception:
+                pass
             if attempt == max_tries:
-                print(f"[!] Failed to connect after {max_tries} tries: {e}")
+                print(f"[!] Failed to connect after {max_tries} tries: {last_error}")
                 print("[!] Returning to main menu.")
                 return
             time.sleep(1.0)
 
     stop_flag = threading.Event()
-    t = threading.Thread(target=receive_loop, args=(s, session_key, stop_flag), daemon=True)
+    t = threading.Thread(target=receive_loop, args=(connected_sock, session_key, stop_flag), daemon=True)
     t.start()
 
     try:
@@ -429,13 +438,16 @@ def run_client():
                 break
             try:
                 ct = encrypt_message(session_key, msg, nonce_counter)
-                s.sendall(ct)
+                connected_sock.sendall(ct)
             except Exception as e:
                 print(f"[!] Send error: {e}")
                 stop_flag.set()
                 break
     finally:
-        s.close()
+        try:
+            connected_sock.close()
+        except Exception:
+            pass
         print("\n[*] Client session ended.")
 
 def main_menu():
