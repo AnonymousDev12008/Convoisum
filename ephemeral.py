@@ -7,6 +7,7 @@ import subprocess
 import time
 import random
 import shutil
+import platform
 
 import socks
 
@@ -23,8 +24,14 @@ from crypto_core import (
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
-TOR_SOCKS_ADDR = "127.0.0.1"
-TOR_SOCKS_PORT = 9050
+# ========= Config: Tor & SOCKS (env-overridable) =========
+TOR_SOCKS_ADDR = os.getenv("TOR_SOCKS_ADDR", "127.0.0.1")
+TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+# Client-side Tor auto-start configuration
+TOR_PATH = os.getenv("TOR_PATH", "tor")      # e.g., "C:\\Tor\\Tor\\tor.exe" on Windows
+TOR_TORRC = os.getenv("TOR_TORRC", "")       # optional torrc path for client auto-start
+
+# ========= Helpers =========
 
 def canonical_pubkey_bytes(pubkey_obj):
     return pubkey_obj.public_bytes(
@@ -73,13 +80,19 @@ def read_pem_from_stdin(prompt_title="Paste peer's public key PEM (end with blan
         if stripped == "" and saw_begin:
             break
         lines.append(stripped)
-        if "END PUBLIC KEY" in stripped:
-            # allow a blank line right after END marker to finish
-            continue
     pem_text = "\n".join(lines).strip()
     if not pem_text or "BEGIN PUBLIC KEY" not in pem_text or "END PUBLIC KEY" not in pem_text:
         return None
     return (pem_text + "\n").encode("ascii", errors="ignore")
+
+def is_listening(host, port, timeout=0.5):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+# ========= Host-side Tor (Hidden Service) =========
 
 def start_tor_hidden_service(local_port):
     temp_dir = tempfile.mkdtemp(prefix="torchat_host_")
@@ -102,20 +115,21 @@ HiddenServiceVersion 3
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        print("[!] Error: Tor executable not found. Make sure Tor is installed and in your PATH.")
+        print("[!] Error: Tor executable not found on host. Ensure 'tor' is in PATH.")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None, None, None
 
     onion_path = os.path.join(hs_dir, "hostname")
     print("[*] Starting Tor, waiting for hidden service address...")
 
+    # Wait up to 60s for hostname to appear
     for _ in range(60):
         if os.path.exists(onion_path):
             with open(onion_path, "r") as f:
                 onion_addr = f.read().strip()
             print(f"[*] Hidden service ready: {onion_addr} (port {local_port})")
-            # Tiny grace delay to allow HS to fully publish
-            time.sleep(1.0)
+            # Grace delay to allow HS to publish
+            time.sleep(2.0)
             return tor_proc, onion_addr, temp_dir
         time.sleep(1)
 
@@ -123,6 +137,61 @@ HiddenServiceVersion 3
     shutil.rmtree(temp_dir, ignore_errors=True)
     print("[!] Timeout waiting for Tor hidden service.")
     return None, None, None
+
+# ========= Client-side Tor auto-start =========
+
+def ensure_tor_running_for_client():
+    """
+    Ensures a Tor SOCKS proxy is available on the client side.
+    If already listening, return (None, False).
+    If started by us, return (proc, True).
+    If start attempt failed, return (None, False) and the connect loop will still try.
+    """
+    if is_listening(TOR_SOCKS_ADDR, TOR_SOCKS_PORT, timeout=0.5):
+        print(f"[*] Detected Tor SOCKS at {TOR_SOCKS_ADDR}:{TOR_SOCKS_PORT}.")
+        return None, False
+
+    print(f"[*] No SOCKS at {TOR_SOCKS_ADDR}:{TOR_SOCKS_PORT}. Attempting to start Tor for client...")
+
+    tor_args = [TOR_PATH]
+    if TOR_TORRC:
+        tor_args += ["-f", TOR_TORRC]
+    else:
+        # Minimal inline config: set SocksPort; Tor chooses default DataDirectory
+        tor_args += ["SocksPort", str(TOR_SOCKS_PORT)]
+
+    creationflags = 0
+    start_new_session = False
+    if platform.system().lower().startswith("win"):
+        # Separate console on Windows; quietly redirect output
+        creationflags = subprocess.CREATE_NEW_CONSOLE
+    else:
+        start_new_session = True
+
+    try:
+        proc = subprocess.Popen(
+            tor_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=start_new_session,
+            creationflags=creationflags
+        )
+    except Exception as e:
+        print(f"[!] Failed to launch Tor automatically: {e}")
+        print("[!] Start Tor manually or set TOR_PATH/TOR_TORRC env vars, then retry.")
+        return None, False
+
+    # Wait up to ~10s for SOCKS to listen (Tor may still bootstrap circuits later)
+    for _ in range(20):
+        time.sleep(0.5)
+        if is_listening(TOR_SOCKS_ADDR, TOR_SOCKS_PORT, timeout=0.3):
+            print(f"[*] Tor SOCKS now listening at {TOR_SOCKS_ADDR}:{TOR_SOCKS_PORT}.")
+            return proc, True
+
+    print("[!] Tor did not start listening in time. It may still be bootstrapping; client will keep retrying.")
+    return proc, True  # started by us, even if not yet listening
+
+# ========= Chat handlers =========
 
 def handle_client(conn, session_key, nonce_counter):
     print("[*] Client connected! Type 'exit' to quit.")
@@ -181,6 +250,31 @@ def handle_client(conn, session_key, nonce_counter):
     except Exception:
         pass
 
+def receive_loop(sock_obj, session_key, stop_flag):
+    while not stop_flag.is_set():
+        try:
+            data = sock_obj.recv(4096)
+            if not data:
+                print("\n[!] Peer disconnected.")
+                stop_flag.set()
+                break
+            msg = decrypt_message(session_key, data)
+            if msg is None:
+                print("\n[!] Message decryption failed - possible tampering!")
+                stop_flag.set()
+                break
+            print(f"\nPeer: {msg}\nYou: ", end="", flush=True)
+            if msg.strip().lower() == "exit":
+                print("[*] Peer ended the chat. Closing session.")
+                stop_flag.set()
+                break
+        except Exception as ex:
+            print(f"\n[!] Socket error: {ex}")
+            stop_flag.set()
+            break
+
+# ========= Host mode =========
+
 def run_host():
     print("====== ephemeral chat: HOST mode ======")
     local_port = random.randint(15000, 20000)
@@ -216,27 +310,27 @@ def run_host():
             print("[!] Returning to main menu.")
             return
 
-        # Canonicalize keys and normalize onion/port
+        # Canonicalize and build transcript
         host_der = canonical_pubkey_bytes(public_key)
         client_der = canonical_pubkey_bytes(peer_public_key)
         onion_norm = onion_addr.strip().lower().encode("ascii")
         port_norm = int(local_port).to_bytes(2, "big")
 
-        # Fixed order: host + client + onion + port
         transcript = host_der + client_der + onion_norm + port_norm
 
         session_key = derive_shared_key_with_context(private_key, peer_public_key, transcript)
         sas = derive_sas(session_key, transcript)
 
-        # Create listener BEFORE prompting SAS so it's ready when client dials
+        # Create listener BEFORE SAS so it's ready
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", local_port))
         listener.listen(1)
         listener.settimeout(300)  # 5 minutes
+        print(f"[*] Listener bound on 127.0.0.1:{local_port}")
 
-        # Small grace pause to ensure readiness
-        time.sleep(1.0)
+        # Grace pause
+        time.sleep(2.0)
 
         print("\n" + "=" * 50)
         print("*** SECURITY VERIFICATION REQUIRED ***")
@@ -275,15 +369,21 @@ def run_host():
             handle_client(conn, session_key, nonce_counter)
 
     finally:
-        print("\n[*] Cleaning up...")
+        print("\n[*] Cleaning up host...")
         try:
             if listener:
                 listener.close()
         except Exception:
             pass
         if tor_proc:
-            tor_proc.terminate()
-            tor_proc.wait()
+            try:
+                tor_proc.terminate()
+                tor_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    tor_proc.kill()
+                except Exception:
+                    pass
         if temp_dir:
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -291,28 +391,7 @@ def run_host():
                 pass
         print("[*] Host session ended.")
 
-def receive_loop(sock, session_key, stop_flag):
-    while not stop_flag.is_set():
-        try:
-            data = sock.recv(4096)
-            if not data:
-                print("\n[!] Peer disconnected.")
-                stop_flag.set()
-                break
-            msg = decrypt_message(session_key, data)
-            if msg is None:
-                print("\n[!] Message decryption failed - possible tampering!")
-                stop_flag.set()
-                break
-            print(f"\nPeer: {msg}\nYou: ", end="", flush=True)
-            if msg.strip().lower() == "exit":
-                print("[*] Peer ended the chat. Closing session.")
-                stop_flag.set()
-                break
-        except Exception as ex:
-            print(f"\n[!] Socket error: {ex}")
-            stop_flag.set()
-            break
+# ========= Client mode =========
 
 def run_client():
     print("====== ephemeral chat: CLIENT mode ======")
@@ -348,13 +427,12 @@ def run_client():
         print("[!] Returning to main menu.")
         return
 
-    # Canonicalize keys and normalize onion/port
+    # Canonicalize and build transcript
     host_der = canonical_pubkey_bytes(peer_public_key)
     client_der = canonical_pubkey_bytes(public_key)
     onion_norm = onion_addr.strip().lower().encode("ascii")
     port_norm = int(port).to_bytes(2, "big")
 
-    # Fixed order: host + client + onion + port
     transcript = host_der + client_der + onion_norm + port_norm
 
     try:
@@ -391,15 +469,18 @@ def run_client():
     print("\n[*] Security verification passed!")
     print("[*] Session key derived. Connecting...\n")
 
-    # Retry with fresh SOCKS socket per attempt to avoid Bad file descriptor
+    # Auto-start Tor on client if needed
+    tor_proc, tor_started_by_us = ensure_tor_running_for_client()
+
+    # Retry with fresh SOCKS socket per attempt; longer timeout & backoff
     connected_sock = None
-    max_tries = 10
+    max_tries = 20
     last_error = None
     for attempt in range(1, max_tries + 1):
         try:
             s = socks.socksocket()
             s.set_proxy(socks.SOCKS5, TOR_SOCKS_ADDR, TOR_SOCKS_PORT)
-            s.settimeout(30)
+            s.settimeout(60)  # allow Tor to build circuits
             s.connect((onion_addr, port))
             connected_sock = s
             print("[*] Connected to host!")
@@ -413,8 +494,15 @@ def run_client():
             if attempt == max_tries:
                 print(f"[!] Failed to connect after {max_tries} tries: {last_error}")
                 print("[!] Returning to main menu.")
+                # If we started Tor, terminate it
+                if tor_proc and tor_started_by_us:
+                    try:
+                        tor_proc.terminate()
+                    except Exception:
+                        pass
                 return
-            time.sleep(1.0)
+            print(f"[*] Attempt {attempt} failed: {e}. Retrying...")
+            time.sleep(min(attempt, 10))
 
     stop_flag = threading.Event()
     t = threading.Thread(target=receive_loop, args=(connected_sock, session_key, stop_flag), daemon=True)
@@ -448,7 +536,15 @@ def run_client():
             connected_sock.close()
         except Exception:
             pass
+        # If this client started Tor, shut it down on exit
+        if tor_proc and tor_started_by_us:
+            try:
+                tor_proc.terminate()
+            except Exception:
+                pass
         print("\n[*] Client session ended.")
+
+# ========= Main menu =========
 
 def main_menu():
     print("====== Convoisum - Ephemeral Tor Chat ======")
