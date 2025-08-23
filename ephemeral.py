@@ -17,7 +17,6 @@ import atexit
 import signal
 import socks
 import re
-import select
 
 import pyperclip
 
@@ -142,6 +141,7 @@ def handle_chat(sock, session_key, nonce_ctr):
 
     def recv_loop():
         nonlocal seq_recv
+        sock.setblocking(True)
         while not stop.is_set():
             try:
                 print("[Debug] Waiting to receive data...")
@@ -359,7 +359,7 @@ def run_client():
 
     s = socks.socksocket()
     s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-    s.setblocking(False)
+    s.setblocking(True)
     print("[Info] Connecting to peer... (type 'cancel' to abort)")
     connect_err = None
     while True:
