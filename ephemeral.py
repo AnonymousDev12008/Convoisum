@@ -1,4 +1,8 @@
-# ephemeral.py - Updated for improved security
+#!/usr/bin/env python3
+"""
+Convoisum – Privacy-focused ephemeral peer-to-peer chat over Tor v3
+"""
+
 import os
 import sys
 import socket
@@ -14,6 +18,7 @@ import atexit
 import signal
 import socks
 import re
+
 from crypto_core import (
     generate_keys,
     serialize_public_key,
@@ -27,10 +32,23 @@ from crypto_core import (
 )
 from cryptography.hazmat.primitives import serialization
 
+# --- Helpers & Cleanup -------------------------------------------------------
+
+_last_tmp_dir = None
+_last_tor_proc = None
+
+def cleanup():
+    if _last_tor_proc:
+        _last_tor_proc.terminate()
+    if _last_tmp_dir and os.path.isdir(_last_tmp_dir):
+        shutil.rmtree(_last_tmp_dir, ignore_errors=True)
+
+atexit.register(cleanup)
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, lambda *_: sys.exit(0))
+
 def strict_onion_v3_check(addr):
-    # Enforce full .onion v3 base32 length/checksum
-    v3_regexp = re.compile(r"^[a-z2-7]{56}\.onion$")
-    return bool(v3_regexp.match(addr.strip().lower()))
+    return bool(re.fullmatch(r"[a-z2-7]{56}\.onion", addr.strip().lower()))
 
 def validate_port(s):
     try:
@@ -40,23 +58,23 @@ def validate_port(s):
         return None
 
 def read_pem_from_stdin(prompt):
+    """
+    Read exactly one PEM public key block, error immediately on invalid format.
+    """
     print(f"\n{prompt}")
-    lines, began = [], False
-    while True:
-        line = sys.stdin.readline()
-        if line == "": break
-        l = line.rstrip("\r\n")
-        if not began:
-            if "BEGIN PUBLIC KEY" in l:
-                began = True
-                lines.append(l)
-        else:
-            if l == "": break
-            lines.append(l)
-    text = "\n".join(lines).strip()
-    if "BEGIN PUBLIC KEY" not in text:
+    header = sys.stdin.readline().strip()
+    if header != "-----BEGIN PUBLIC KEY-----":
+        print("[!] Invalid PEM header; returning to menu.")
         return None
-    return (text + "\n").encode()
+    lines = [header]
+    for _ in range(1000):
+        line = sys.stdin.readline().rstrip("\r\n")
+        lines.append(line)
+        if line == "-----END PUBLIC KEY-----":
+            pem = "\n".join(lines) + "\n"
+            return pem.encode()
+    print("[!] PEM did not terminate correctly; returning to menu.")
+    return None
 
 def is_listening(host, port, timeout=0.5):
     try:
@@ -65,11 +83,16 @@ def is_listening(host, port, timeout=0.5):
     except:
         return False
 
+# --- Tor Helpers -------------------------------------------------------------
+
 def start_tor_hidden_service(local_port):
-    tmp = tempfile.mkdtemp(prefix="torchat_host_")
+    global _last_tmp_dir, _last_tor_proc
+    tmp = tempfile.mkdtemp(prefix="convoisum_")
     os.chmod(tmp, 0o700)
+    _last_tmp_dir = tmp
+
     hs = os.path.join(tmp, "hs")
-    os.makedirs(hs, mode=0o700, exist_ok=True)
+    os.makedirs(hs, mode=0o700)
     torrc = os.path.join(tmp, "torrc")
     with open(torrc, "w") as f:
         f.write(f"""
@@ -78,182 +101,180 @@ HiddenServiceDir {hs}
 HiddenServicePort {local_port} 127.0.0.1:{local_port}
 HiddenServiceVersion 3
 """)
-    proc = None
     try:
-        proc = subprocess.Popen([
-            "tor", "-f", torrc
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=not platform.system().lower().startswith("win"))
+        proc = subprocess.Popen(
+            ["tor", "-f", torrc],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=not platform.system().lower().startswith("win")
+        )
     except FileNotFoundError:
+        print("[!] Tor executable not found.")
         shutil.rmtree(tmp, ignore_errors=True)
-        print("[!] Tor not found")
         return None, None, None
-    hostname = os.path.join(hs, "hostname")
+
+    _last_tor_proc = proc
+    hostname_path = os.path.join(hs, "hostname")
     for _ in range(60):
-        if os.path.exists(hostname):
-            addr = open(hostname).read().strip()
+        if os.path.exists(hostname_path):
+            onion = open(hostname_path).read().strip()
             time.sleep(2)
-            return proc, addr, tmp
+            return proc, onion, tmp
         time.sleep(1)
+
     proc.terminate()
     shutil.rmtree(tmp, ignore_errors=True)
     print("[!] Timeout creating hidden service")
     return None, None, None
 
-def ensure_tor_running_for_client():
-    if is_listening("127.0.0.1", 9050):
-        return None, False
-    try:
-        proc = subprocess.Popen([
-            "tor", "SocksPort", "9050"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=not platform.system().lower().startswith("win"))
-    except Exception as e:
-        print(f"[!] Tor launch failed: {e}")
-        return None, False
-    for _ in range(20):
-        time.sleep(0.5)
-        if is_listening("127.0.0.1", 9050):
-            return proc, True
-    return proc, True
+# --- Chat Logic --------------------------------------------------------------
 
 def build_transcript(host_der, client_der, onion, port):
-    # Deterministic transcript: DER-keys, address, port only (no salt/timestamp)
-    return host_der + client_der + onion.encode("ascii") + port.to_bytes(2, "big")
+    return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
 
 def handle_chat(sock, session_key, nonce_ctr):
     stop = threading.Event()
     seq_send = 0
     seq_recv = 0
-    seen_recv = set()  # Prevent replay of ciphertext by keeping track
+    seen = set()
 
     def recv_loop():
         nonlocal seq_recv
         while not stop.is_set():
-            try:
-                data = sock.recv(4096)
-                if not data:
-                    print("\n[!] Peer disconnected")
-                    stop.set(); break
-                if (seq_recv in seen_recv):
-                    continue  # ignore replay
-                msg = decrypt_message(session_key, data, seq_recv)
-                if msg is None:
-                    print("\n[!] Decryption failed"); stop.set(); break
-                print(f"\nPeer: {msg}\nYou: ", end="", flush=True)
-                if msg.strip().lower() == "exit":
-                    stop.set(); break
-                seen_recv.add(seq_recv)
-                seq_recv += 1
-            except:
-                stop.set(); break
+            data = sock.recv(4096)
+            if not data:
+                print("\n[!] Peer disconnected")
+                stop.set()
+                return
+            if seq_recv in seen:
+                continue
+            msg = decrypt_message(session_key, data, seq_recv)
+            if msg is None:
+                print("\n[!] Decryption failed")
+                stop.set()
+                return
+            print(f"\nPeer: {msg}\nYou: ", end="", flush=True)
+            if msg.strip().lower() == "exit":
+                stop.set()
+                return
+            seen.add(seq_recv)
+            seq_recv += 1
+
     threading.Thread(target=recv_loop, daemon=True).start()
 
     while not stop.is_set():
         try:
             msg = input("You: ")
-        except:
-            stop.set(); break
-        if msg.strip().lower() == "exit":
-            sock.sendall(encrypt_message(session_key, msg, nonce_ctr, seq_send))
-            stop.set(); break
+        except (EOFError, KeyboardInterrupt):
+            stop.set()
+            break
         sock.sendall(encrypt_message(session_key, msg, nonce_ctr, seq_send))
+        if msg.strip().lower() == "exit":
+            stop.set()
         seq_send += 1
     sock.close()
-    session_key.destroy()
 
 def run_host():
-    print("=== HOST MODE ===")
-    port = random.randint(15000,20000)
+    print("\n=== Host Mode ===")
+    port = random.randint(15000, 20000)
     proc, onion, tmp = start_tor_hidden_service(port)
-    if not proc: return
+    if not proc:
+        return
+
+    print(f"\nShare this with your peer:\n  Onion Address: {onion}\n  Port: {port}\n")
+
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
-    print(f"Onion: {onion} Port: {port}")
     host_pem = serialize_public_key(pub)
     print(host_pem.decode())
-    peer_pem = read_pem_from_stdin("Paste peer PEM:")
-    if not peer_pem: return
-    # Strict public key validation on both keys
-    peer_pub = deserialize_public_key(peer_pem)
-    host_der = pub.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-    client_der = peer_pub.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+    peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
+    if not peer_pem:
+        return
+    try:
+        peer_pub = deserialize_public_key(peer_pem)
+    except ValueError as e:
+        print(f"[!] {e}")
+        return
+
+    host_der = pub.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    client_der = peer_pub.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print("\n" + "="*50)
-    print(f"Verification code: {sas}")
-    print("Compare over secure channel")
-    print("="*50)
-    if input("Confirm (yes/no): ").strip().lower() != "yes":
-        print("Security fail"); return
+    print(f"\nVerification code: {sas}\nConfirm over secure channel.")
+    if input("Proceed? (yes/no): ").strip().lower() != "yes":
+        print("Aborted.")
+        return
+
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
-    try:
-        conn, _ = listener.accept()
-        handle_chat(conn, session_key, nonce_ctr)
-    except socket.timeout:
-        pass
-    finally:
-        listener.close()
-        if proc:
-            proc.terminate()
-        shutil.rmtree(tmp, ignore_errors=True)
-    print("Host session ended")
+    conn, _ = listener.accept()
+    handle_chat(conn, session_key, nonce_ctr)
+    listener.close()
+    print("Host session ended.")
 
 def run_client():
-    print("=== CLIENT MODE ===")
+    print("\n=== Client Mode ===")
     onion = input("Onion address: ").strip()
     if not strict_onion_v3_check(onion):
-        print("Invalid .onion address v3"); return
+        print("[!] Invalid .onion v3 address.")
+        return
     port = validate_port(input("Port: ").strip())
-    if not port: return
+    if not port:
+        print("[!] Invalid port number.")
+        return
+
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
     client_pem = serialize_public_key(pub)
     print(client_pem.decode())
-    peer_pem = read_pem_from_stdin("Paste host PEM:")
-    if not peer_pem: return
-    peer_pub = deserialize_public_key(peer_pem)
-    host_der = peer_pub.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-    client_der = pub.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+    peer_pem = read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
+    if not peer_pem:
+        return
+    try:
+        peer_pub = deserialize_public_key(peer_pem)
+    except ValueError as e:
+        print(f"[!] {e}")
+        return
+
+    host_der = peer_pub.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    client_der = pub.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print("\n" + "="*50)
-    print(f"Verification code: {sas}")
-    print("="*50)
-    if input("Confirm (yes/no): ").strip().lower() != "yes":
-        print("Security fail"); return
-    proc, started = ensure_tor_running_for_client()
-    s = None
-    for _ in range(20):
-        try:
-            s = socks.socksocket()
-            s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-            s.connect((onion, port))
-            break
-        except:
-            time.sleep(1)
-    if not s:
-        print("Connection failed"); return
-    handle_chat(s, session_key, nonce_ctr)
-    if proc and started:
-        proc.terminate()
-    print("Client session ended")
+    print(f"\nVerification code: {sas}\nConfirm over secure channel.")
+    if input("Proceed? (yes/no): ").strip().lower() != "yes":
+        print("Aborted.")
+        return
 
-def cleanup_on_exit(tmp_dir, proc):
-    def cleanup(*_):
-        try:
-            if proc: proc.terminate()
-        except:
-            pass
-        try:
-            if tmp_dir: shutil.rmtree(tmp_dir, ignore_errors=True)
-        except:
-            pass
-    return cleanup
+    if not is_listening("127.0.0.1", 9050):
+        subprocess.Popen(
+            ["tor", "SocksPort", "9050"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    s = socks.socksocket()
+    s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+    s.connect((onion, port))
+    handle_chat(s, session_key, nonce_ctr)
+    print("Client session ended.")
 
 def main_menu():
+    print("Welcome to Convoisum!\n")
     while True:
         choice = input("Host(h)/Join(j)/Quit(q): ").strip().lower()
         if choice == "h":
@@ -266,5 +287,5 @@ def main_menu():
 if __name__ == "__main__":
     try:
         main_menu()
-    except KeyboardInterrupt:
-        sys.exit("\nInterrupted")
+    except SystemExit:
+        pass
