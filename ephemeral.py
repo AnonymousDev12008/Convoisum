@@ -18,7 +18,7 @@ import signal
 import socks
 import re
 
-import pyperclip  # For clipboard functionality
+import pyperclip
 
 from crypto_core import (
     generate_keys,
@@ -114,11 +114,13 @@ HiddenServiceVersion 3
 
     _last_tor_proc = proc
     hostname_path = os.path.join(hs, "hostname")
-    for _ in range(60):
+    for i in range(120):
         if os.path.exists(hostname_path):
             onion = open(hostname_path).read().strip()
             time.sleep(2)
             return proc, onion, tmp
+        if i % 10 == 0:
+            print(f"[Info] Waiting for Tor hidden service deployment... {i+1} seconds elapsed")
         time.sleep(1)
 
     proc.terminate()
@@ -263,6 +265,7 @@ def run_host():
 
     try:
         conn, _ = listener.accept()
+        print("[Info] Peer connected. Starting chat session.")
     except Exception:
         if stop_flag.is_set():
             return
@@ -293,16 +296,16 @@ def run_client():
         print("[Error] Invalid port number.")
         return
 
-    # Ensure Tor is running locally
     if not is_listening("127.0.0.1", 9050):
         print("[Info] Starting Tor locally... please wait.")
         try:
             subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Wait briefly for Tor to initialize
-            for _ in range(10):
+            for _ in range(20):
                 if is_listening("127.0.0.1", 9050):
                     break
                 time.sleep(1)
+            else:
+                print("[Warning] Timeout waiting for Tor proxy on port 9050.")
         except FileNotFoundError:
             print("[!] Tor not found; please start Tor manually and retry.")
             return
@@ -355,6 +358,7 @@ def run_client():
     while True:
         try:
             s.connect((onion, port))
+            print("[Info] Connected! Starting chat. Type 'exit' to leave.")
             break
         except BlockingIOError:
             pass
@@ -371,7 +375,6 @@ def run_client():
         print(f"[Error] Could not connect: {connect_err}")
         return
 
-    print("[Info] Connected! Starting chat. Type 'exit' to leave.")
     handle_chat(s, session_key, nonce_ctr)
     print("[Info] Client session ended.")
 
