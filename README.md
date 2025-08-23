@@ -66,7 +66,7 @@ Convoisum is a command-line chat tool designed to enable **secure, anonymous, an
    ```
 3. **Clone and install Convoisum**
    ```bash
-   git clone https://github.com/your-repo/convoisum.git
+   git clone https://github.com/AnonymousDev12008/convoisum.git
    cd convoisum
    pip3 install -r requirements.txt
    ```
@@ -149,4 +149,5 @@ Convoisum improves privacy and security but does not eliminate all risks. Users 
 ***
 
 Thank you for choosing Convoisum for your secure communications!
+
 
