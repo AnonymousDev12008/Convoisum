@@ -17,6 +17,7 @@ import atexit
 import signal
 import socks
 import re
+import select
 
 import pyperclip
 
@@ -143,13 +144,19 @@ def handle_chat(sock, session_key, nonce_ctr):
         nonlocal seq_recv
         while not stop.is_set():
             try:
+                print("[Debug] Waiting to receive data...")
                 data = sock.recv(4096)
-            except Exception:
-                print("\n[!] Connection error or peer disconnected")
+                print(f"[Debug] Received {len(data)} bytes")
+            except ConnectionResetError:
+                print("\n[!] Connection reset by peer")
+                stop.set()
+                return
+            except Exception as e:
+                print(f"\n[!] Exception in recv_loop: {e}")
                 stop.set()
                 return
             if not data:
-                print("\n[!] Peer disconnected")
+                print("\n[!] Peer disconnected (no data)")
                 stop.set()
                 return
             if seq_recv in seen:
