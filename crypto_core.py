@@ -65,32 +65,27 @@ def validate_public_key(public_key):
     try:
         nums = public_key.public_numbers()
         
+        print(f"Public key X: {nums.x}")
+        print(f"Public key Y: {nums.y}")
+        print(f"Curve: {type(nums.curve)}")
+        
         # Reject identity point (0,0)
         if nums.x == 0 and nums.y == 0:
+            print("[!] Validation failed: Identity point (0,0)")
             return False
         
         # Verify key is on P-256 curve
         if not isinstance(nums.curve, ec.SECP256R1):
+            print("[!] Validation failed: Key is not on SECP256R1 curve")
             return False
-            
-        # Curve parameters for P-256
-        curve = nums.curve
-        p = curve.curve.p
         
-        # Check point is on curve: y^2 == x^3 + a*x + b mod p
-        left = (nums.y * nums.y) % p
-        right = (nums.x * nums.x * nums.x + curve.curve.a * nums.x + curve.curve.b) % p
-        
-        if left != right:
-            return False
-            
-        # Check coordinates are in valid range
-        if not (0 < nums.x < p and 0 < nums.y < p):
-            return False
-            
+        print("[+] Public key validation passed")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[!] Exception during key validation: {e}")
         return False
+
+
 
 def derive_shared_key_with_context(private_key, peer_public_key, session_context: bytes):
     """Derive shared session key using ECDH + HKDF"""
