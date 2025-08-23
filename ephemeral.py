@@ -17,6 +17,7 @@ import atexit
 import signal
 import socks
 import re
+import select
 
 import pyperclip  # For clipboard functionality
 
@@ -58,23 +59,19 @@ def validate_port(s):
         return None
 
 def read_pem_from_stdin(prompt):
-    """
-    Read exactly one PEM public key block, error immediately on invalid format.
-    """
     print(f"\n{prompt}")
     print("(Enter full PEM block, including BEGIN/END headers)")
     lines = []
     while True:
         line = sys.stdin.readline()
         if not line:
-            print("[!] EOF reached without completing PEM; returning to menu.")
+            print("[!] EOF without complete PEM; returning to menu.")
             return None
         line = line.rstrip("\r\n")
         lines.append(line)
         if line == "-----END PUBLIC KEY-----":
             break
     pem_str = "\n".join(lines) + "\n"
-    # Basic validation for BEGIN header
     if not pem_str.startswith("-----BEGIN PUBLIC KEY-----"):
         print("[!] Invalid PEM header; returning to menu.")
         return None
@@ -203,15 +200,13 @@ def run_host():
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
     host_pem = serialize_public_key(pub)
+    pem_text = host_pem.decode()
 
-    # Copy to clipboard
     try:
-        pem_text = host_pem.decode()
         pyperclip.copy(pem_text)
         print("[Info] Your public key PEM has been copied to clipboard for sharing.\n")
     except Exception:
-        print("[Warning] Failed to copy public key PEM to clipboard. Please copy manually:\n")
-        print(pem_text)
+        print("[Warning] Failed to copy to clipboard, please copy manually:\n")
 
     print(pem_text)
 
@@ -220,6 +215,7 @@ def run_host():
         return
     try:
         peer_pub = deserialize_public_key(peer_pem)
+        print("[Success] Public key verified.")
     except ValueError as e:
         print(f"[!] Failed to deserialize public key: {e}")
         return
@@ -235,8 +231,8 @@ def run_host():
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"\n[SAS] Verification code for manual confirmation:\n  {sas}\n")
-    confirm = input("[Prompt] Confirm that the SAS matches with your peer's (yes/no): ").strip().lower()
+    print(f"\n[SAS] Verification code for confirmation:\n  {sas}\n")
+    confirm = input("[Prompt] Proceed? (yes/no): ").strip().lower()
     if confirm != "yes":
         print("[Info] Session aborted. Returning to main menu.")
         return
@@ -245,44 +241,66 @@ def run_host():
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
     print("[Info] Waiting for a peer to connect... (type 'cancel' to abort)")
-    conn, _ = listener.accept()
+    # Accept in non-blocking mode with cancel
+    listener.setblocking(False)
+    while True:
+        ready = select.select([listener], [], [], 0.5)[0]
+        if ready:
+            conn, _ = listener.accept()
+            break
+        if sys.stdin in select.select([sys.stdin], [], [], 0):
+            cmd = sys.stdin.readline().strip().lower()
+            if cmd == "cancel":
+                print("[Info] Host cancelled. Returning to menu.")
+                listener.close()
+                return
     handle_chat(conn, session_key, nonce_ctr)
     listener.close()
     print("[Info] Host session ended.")
 
 def run_client():
     print("\n--- Join an existing chat session ---")
-    while True:
-        onion = input("[Prompt] Enter host Onion address (.onion): ").strip()
-        if onion.lower() == "cancel":
-            print("[Info] Operation cancelled. Returning to main menu.")
-            return
-        if strict_onion_v3_check(onion):
-            break
-        print("[Error] Invalid .onion v3 address. Please try again or type 'cancel' to abort.\n")
+    onion = input("[Prompt] Enter host Onion address (.onion): ").strip()
+    if onion.lower() == "cancel":
+        print("[Info] Operation cancelled. Returning to main menu.")
+        return
+    if not strict_onion_v3_check(onion):
+        print("[Error] Invalid .onion v3 address.")
+        return
 
-    while True:
-        port_s = input("[Prompt] Enter host port number: ").strip()
-        if port_s.lower() == "cancel":
-            print("[Info] Operation cancelled. Returning to main menu.")
+    port_s = input("[Prompt] Enter host port number: ").strip()
+    if port_s.lower() == "cancel":
+        print("[Info] Operation cancelled. Returning to main menu.")
+        return
+    port = validate_port(port_s)
+    if not port:
+        print("[Error] Invalid port number.")
+        return
+
+    # Ensure Tor is running locally
+    if not is_listening("127.0.0.1", 9050):
+        print("[Info] Starting Tor locally... please wait.")
+        try:
+            subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Wait briefly for Tor to initialize
+            for _ in range(10):
+                if is_listening("127.0.0.1", 9050):
+                    break
+                time.sleep(1)
+        except FileNotFoundError:
+            print("[!] Tor not found; please start Tor manually and retry.")
             return
-        port = validate_port(port_s)
-        if port:
-            break
-        print("[Error] Invalid port number. Must be between 1024 and 65535.\n")
 
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
     client_pem = serialize_public_key(pub)
+    pem_text = client_pem.decode()
 
-    # Copy to clipboard
     try:
-        pem_text = client_pem.decode()
         pyperclip.copy(pem_text)
         print("[Info] Your public key PEM has been copied to clipboard for sharing.\n")
     except Exception:
-        print("[Warning] Failed to copy public key PEM to clipboard. Please copy manually:\n")
-        print(pem_text)
+        print("[Warning] Failed to copy to clipboard, please copy manually:\n")
 
     print(pem_text)
 
@@ -291,6 +309,7 @@ def run_client():
         return
     try:
         peer_pub = deserialize_public_key(peer_pem)
+        print("[Success] Public key verified.")
     except ValueError as e:
         print(f"[!] Failed to deserialize public key: {e}")
         return
@@ -306,24 +325,36 @@ def run_client():
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"\n[SAS] Verification code for manual confirmation:\n  {sas}\n")
-    confirm = input("[Prompt] Confirm that the SAS matches with your host's (yes/no): ").strip().lower()
+    print(f"\n[SAS] Verification code for confirmation:\n  {sas}\n")
+    confirm = input("[Prompt] Proceed? (yes/no): ").strip().lower()
     if confirm != "yes":
         print("[Info] Session aborted. Returning to main menu.")
         return
 
-    if not is_listening("127.0.0.1", 9050):
-        subprocess.Popen(
-            ["tor", "SocksPort", "9050"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
+    # Connect with cancel capability
     s = socks.socksocket()
     s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-    try:
-        s.connect((onion, port))
-    except Exception as e:
-        print(f"[Error] Could not connect to peer: {e}")
+    s.setblocking(False)
+    print("[Info] Connecting to peer... (type 'cancel' to abort)")
+    connect_err = None
+    while True:
+        try:
+            s.connect((onion, port))
+            break
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            connect_err = e
+            break
+        # Check for cancel input
+        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            cmd = sys.stdin.readline().strip().lower()
+            if cmd == "cancel":
+                print("[Info] Connection cancelled. Returning to menu.")
+                return
+        time.sleep(0.2)
+    if connect_err:
+        print(f"[Error] Could not connect: {connect_err}")
         return
 
     print("[Info] Connected! Starting chat. Type 'exit' to leave.")
@@ -355,7 +386,4 @@ Select your action:
             print("[Error] Invalid choice, please enter 'h', 'j', or 'q'.\n")
 
 if __name__ == "__main__":
-    try:
-        main_menu()
-    except SystemExit:
-        pass
+    main_menu()
