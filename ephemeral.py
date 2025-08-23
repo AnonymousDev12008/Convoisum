@@ -12,12 +12,13 @@ import subprocess
 import time
 import random
 import shutil
-import struct
 import platform
 import atexit
 import signal
 import socks
 import re
+
+import pyperclip  # For clipboard functionality
 
 from crypto_core import (
     generate_keys,
@@ -28,7 +29,6 @@ from crypto_core import (
     encrypt_message,
     decrypt_message,
     SecureNonceCounter,
-    SecureBytes
 )
 from cryptography.hazmat.primitives import serialization
 
@@ -62,19 +62,23 @@ def read_pem_from_stdin(prompt):
     Read exactly one PEM public key block, error immediately on invalid format.
     """
     print(f"\n{prompt}")
-    header = sys.stdin.readline().strip()
-    if header != "-----BEGIN PUBLIC KEY-----":
-        print("[!] Invalid PEM header; returning to menu.")
-        return None
-    lines = [header]
-    for _ in range(1000):
-        line = sys.stdin.readline().rstrip("\r\n")
+    print("(Enter full PEM block, including BEGIN/END headers)")
+    lines = []
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            print("[!] EOF reached without completing PEM; returning to menu.")
+            return None
+        line = line.rstrip("\r\n")
         lines.append(line)
         if line == "-----END PUBLIC KEY-----":
-            pem = "\n".join(lines) + "\n"
-            return pem.encode()
-    print("[!] PEM did not terminate correctly; returning to menu.")
-    return None
+            break
+    pem_str = "\n".join(lines) + "\n"
+    # Basic validation for BEGIN header
+    if not pem_str.startswith("-----BEGIN PUBLIC KEY-----"):
+        print("[!] Invalid PEM header; returning to menu.")
+        return None
+    return pem_str.encode()
 
 def is_listening(host, port, timeout=0.5):
     try:
@@ -140,7 +144,12 @@ def handle_chat(sock, session_key, nonce_ctr):
     def recv_loop():
         nonlocal seq_recv
         while not stop.is_set():
-            data = sock.recv(4096)
+            try:
+                data = sock.recv(4096)
+            except Exception:
+                print("\n[!] Connection error or peer disconnected")
+                stop.set()
+                return
             if not data:
                 print("\n[!] Peer disconnected")
                 stop.set()
@@ -165,6 +174,11 @@ def handle_chat(sock, session_key, nonce_ctr):
         try:
             msg = input("You: ")
         except (EOFError, KeyboardInterrupt):
+            print("\n[Info] Input interrupted, exiting chat.")
+            stop.set()
+            break
+        if msg.strip().lower() == "cancel":
+            print("[Info] Cancel command received, stopping chat session.")
             stop.set()
             break
         sock.sendall(encrypt_message(session_key, msg, nonce_ctr, seq_send))
@@ -174,26 +188,40 @@ def handle_chat(sock, session_key, nonce_ctr):
     sock.close()
 
 def run_host():
-    print("\n=== Host Mode ===")
+    print("\n--- Hosting a new chat session ---")
     port = random.randint(15000, 20000)
+    print("[Info] Creating your Tor hidden service... please wait.")
     proc, onion, tmp = start_tor_hidden_service(port)
     if not proc:
         return
 
-    print(f"\nShare this with your peer:\n  Onion Address: {onion}\n  Port: {port}\n")
+    print("\n[Success] Hidden service created successfully!\n")
+    print("[Connection Info] Share securely with your peer:")
+    print(f"  - Onion address: {onion}")
+    print(f"  - Port: {port}\n")
 
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
     host_pem = serialize_public_key(pub)
-    print(host_pem.decode())
 
-    peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
+    # Copy to clipboard
+    try:
+        pem_text = host_pem.decode()
+        pyperclip.copy(pem_text)
+        print("[Info] Your public key PEM has been copied to clipboard for sharing.\n")
+    except Exception:
+        print("[Warning] Failed to copy public key PEM to clipboard. Please copy manually:\n")
+        print(pem_text)
+
+    print(pem_text)
+
+    peer_pem = read_pem_from_stdin("Paste your peer's public key PEM:")
     if not peer_pem:
         return
     try:
         peer_pub = deserialize_public_key(peer_pem)
     except ValueError as e:
-        print(f"[!] {e}")
+        print(f"[!] Failed to deserialize public key: {e}")
         return
 
     host_der = pub.public_bytes(
@@ -207,42 +235,64 @@ def run_host():
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"\nVerification code: {sas}\nConfirm over secure channel.")
-    if input("Proceed? (yes/no): ").strip().lower() != "yes":
-        print("Aborted.")
+    print(f"\n[SAS] Verification code for manual confirmation:\n  {sas}\n")
+    confirm = input("[Prompt] Confirm that the SAS matches with your peer's (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("[Info] Session aborted. Returning to main menu.")
         return
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
+    print("[Info] Waiting for a peer to connect... (type 'cancel' to abort)")
     conn, _ = listener.accept()
     handle_chat(conn, session_key, nonce_ctr)
     listener.close()
-    print("Host session ended.")
+    print("[Info] Host session ended.")
 
 def run_client():
-    print("\n=== Client Mode ===")
-    onion = input("Onion address: ").strip()
-    if not strict_onion_v3_check(onion):
-        print("[!] Invalid .onion v3 address.")
-        return
-    port = validate_port(input("Port: ").strip())
-    if not port:
-        print("[!] Invalid port number.")
-        return
+    print("\n--- Join an existing chat session ---")
+    while True:
+        onion = input("[Prompt] Enter host Onion address (.onion): ").strip()
+        if onion.lower() == "cancel":
+            print("[Info] Operation cancelled. Returning to main menu.")
+            return
+        if strict_onion_v3_check(onion):
+            break
+        print("[Error] Invalid .onion v3 address. Please try again or type 'cancel' to abort.\n")
+
+    while True:
+        port_s = input("[Prompt] Enter host port number: ").strip()
+        if port_s.lower() == "cancel":
+            print("[Info] Operation cancelled. Returning to main menu.")
+            return
+        port = validate_port(port_s)
+        if port:
+            break
+        print("[Error] Invalid port number. Must be between 1024 and 65535.\n")
 
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
     client_pem = serialize_public_key(pub)
-    print(client_pem.decode())
 
-    peer_pem = read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
+    # Copy to clipboard
+    try:
+        pem_text = client_pem.decode()
+        pyperclip.copy(pem_text)
+        print("[Info] Your public key PEM has been copied to clipboard for sharing.\n")
+    except Exception:
+        print("[Warning] Failed to copy public key PEM to clipboard. Please copy manually:\n")
+        print(pem_text)
+
+    print(pem_text)
+
+    peer_pem = read_pem_from_stdin("Paste host's public key PEM:")
     if not peer_pem:
         return
     try:
         peer_pub = deserialize_public_key(peer_pem)
     except ValueError as e:
-        print(f"[!] {e}")
+        print(f"[!] Failed to deserialize public key: {e}")
         return
 
     host_der = peer_pub.public_bytes(
@@ -256,9 +306,10 @@ def run_client():
     transcript = build_transcript(host_der, client_der, onion, port)
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"\nVerification code: {sas}\nConfirm over secure channel.")
-    if input("Proceed? (yes/no): ").strip().lower() != "yes":
-        print("Aborted.")
+    print(f"\n[SAS] Verification code for manual confirmation:\n  {sas}\n")
+    confirm = input("[Prompt] Confirm that the SAS matches with your host's (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("[Info] Session aborted. Returning to main menu.")
         return
 
     if not is_listening("127.0.0.1", 9050):
@@ -269,20 +320,39 @@ def run_client():
 
     s = socks.socksocket()
     s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-    s.connect((onion, port))
+    try:
+        s.connect((onion, port))
+    except Exception as e:
+        print(f"[Error] Could not connect to peer: {e}")
+        return
+
+    print("[Info] Connected! Starting chat. Type 'exit' to leave.")
     handle_chat(s, session_key, nonce_ctr)
-    print("Client session ended.")
+    print("[Info] Client session ended.")
 
 def main_menu():
-    print("Welcome to Convoisum!\n")
+    print("""
+==========================================
+           ========  Convoisum ========
+       *** Hide ** Chat ** Erase ** Repeat ***
+                   Welcome !!!
+
+Select your action:
+  [h] Host a chat session
+  [j] Join a chat session
+  [q] Quit the program
+""")
     while True:
-        choice = input("Host(h)/Join(j)/Quit(q): ").strip().lower()
+        choice = input("Enter choice (h/j/q): ").strip().lower()
         if choice == "h":
             run_host()
         elif choice == "j":
             run_client()
         elif choice == "q":
+            print("[Info] Exiting Convoisum. Goodbye!")
             break
+        else:
+            print("[Error] Invalid choice, please enter 'h', 'j', or 'q'.\n")
 
 if __name__ == "__main__":
     try:
