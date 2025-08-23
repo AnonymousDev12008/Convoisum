@@ -1,160 +1,151 @@
-# Ephemeral Tor Chat
+# Convoisum
 
-A **privacy-focused, ephemeral, peer-to-peer chat application** running over Tor hidden services.  
-It uses fresh ephemeral cryptographic keys for every session, routes traffic anonymously via Tor, and destroys all data on exit. Perfect for secure, anonymous, and temporary chat sessions.
+### Privacy-Focused Ephemeral Peer-to-Peer Chat Over Tor v3
+
+***
 
 ## Table of Contents
 
-- [About](#about)  
-- [How It Works](#how-it-works)  
-- [Features](#features)  
-- [Requirements](#requirements)  
-- [Installation](#installation)  
-- [Usage](#usage)  
-- [Using on Termux (Android)](#using-on-termux-android)  
-- [Cleanup](#cleanup)  
-- [Security Considerations](#security-considerations)  
-- [License](#license)
+1. [Overview](#overview)  
+2. [Key Features](#key-features)  
+3. [Security Recommendations](#security-recommendations)  
+4. [Prerequisites & Installation](#prerequisites--installation)  
+   - [Linux / Termux Setup](#linux--termux-setup)  
+   - [Windows PowerShell Setup](#windows-powershell-setup)  
+5. [Configuration](#configuration)  
+6. [Usage Instructions](#usage-instructions)  
+   - [Hosting a Chat Session](#hosting-a-chat-session)  
+   - [Joining a Chat Session](#joining-a-chat-session)  
+7. [Notes and Best Practices](#notes-and-best-practices)  
+8. [Disclaimer](#disclaimer)  
 
-## About
+***
 
-`ephemeral Tor chat` creates a temporary chat room using a Tor hidden service as the host. Clients connect to the `.onion` address over Tor. Both peers exchange ephemeral public keys, derive a shared session key, and communicate with end-to-end encrypted messages. The host establishes a Tor hidden service with a fresh `.onion` address each session. All session data and keys are destroyed on exit, ensuring no lasting trace.
+## Overview
 
-## How It Works
+Convoisum is a command-line chat tool designed to enable **secure, anonymous, and ephemeral conversations** routed through the Tor v3 network’s hidden services. It uses **strong end-to-end encryption**, **manual SAS verification**, and **Tor anonymity** features to protect user privacy and prevent common network attacks.
 
-- **Host:** Creates a new Tor hidden service with a unique `.onion` address. Generates ephemeral cryptographic keys and prints its public key PEM.  
-- **Client:** Connects to the host’s `.onion` address via Tor SOCKS5 proxy, also generates ephemeral keys and sends its public key PEM.  
-- Both derive a shared symmetric session key via Elliptic Curve Diffie-Hellman (ECDH).  
-- Messages are encrypted end-to-end using AES-GCM.  
-- Communication flows entirely inside the Tor network, hiding IP addresses.  
-- When either side types `exit`, the session ends, Tor subprocess and temporary files are cleaned up, making the chat fully ephemeral.
+***
 
-## Features
+## Key Features
 
-- Strong anonymity leveraging Tor hidden services  
-- Ephemeral, one-time-use `.onion` addresses per session  
-- End-to-end encryption with ephemeral keys  
-- Peer-to-peer direct connections with no central servers  
-- Simple CLI interface with a unified host/join menu  
-- Cross-platform: Windows, Linux, macOS, and Android (Termux)  
-- Lightweight, minimal dependencies (Python, cryptography, PySocks, Tor)  
+- Creates ephemeral Tor hidden services with unique .onion addresses  
+- Secure peer authentication via public key exchange and SAS verification  
+- Clipboard support for easy key sharing with security reminders  
+- Role selection: host or join chat sessions  
+- Length-limiting chat messages to prevent abuse  
+- Cancel commands at almost every step for safety  
+- Clear, consistent tagged console prompts and statuses  
+- Cross-platform with support for Linux, Windows PowerShell, and Termux
 
-## Requirements
+***
 
-- Python 3.7+  
-- Tor installed and in your system PATH (or accessible as `tor` command)  
-- Python packages:
-  - `cryptography`
-  - `PySocks`  
+## Security Recommendations
 
-## Installation
+- Always **exchange public keys through a secure, authenticated channel** such as a video call to prevent man-in-the-middle attacks.  
+- Confirm the SAS string displayed on both sides before chatting.  
+- Keep Tor and all system software updated.  
+- Prefer ephemeral sessions with minimal persistent information.  
+- Avoid sending overly long messages to maintain stability and reduce attack surface.
 
-### 1. Install Tor
+***
 
-- **Windows/macOS/Linux:** Download and install the official [Tor Expert Bundle or Tor Browser](https://www.torproject.org/).  
-- Ensure `tor` command runs from terminal or is accessible in your PATH.
+## Prerequisites & Installation
 
-### 2. Install Python Dependencies
+### Linux / Termux Setup
 
-    pip install -r requirements.txt
+1. **Update & Upgrade system packages**
+   ```bash
+   pkg update && pkg upgrade    # Termux
+   sudo apt update && sudo apt upgrade -y   # Debian/Ubuntu Linux
+   ```
+2. **Install required tools**
+   ```bash
+   pkg install python git tor rust -y    # Termux
+   sudo apt install python3 python3-pip git tor rustc build-essential -y   # Linux
+   ```
+3. **Clone and install Convoisum**
+   ```bash
+   git clone https://github.com/your-repo/convoisum.git
+   cd convoisum
+   pip3 install -r requirements.txt
+   ```
+4. **Start Tor daemon manually if desired**
+   ```bash
+   tor &
+   ```
+   Or let the app start Tor automatically.
 
+***
 
-## Usage
+### Windows PowerShell Setup
 
-1. Put `ephemeral.py` and `crypto_core.py` in the same directory.
+1. **Install prerequisites**
+   - Install [Python 3.x](https://www.python.org/downloads/windows/) and add it to your PATH  
+   - Install [Git for Windows](https://gitforwindows.org/)  
+   - Install [Tor Expert Bundle](https://www.torproject.org/download/tor/) and run tor.exe manually or as service  
 
-2. Run the script:
-
+2. **Clone the repository**
+   ```powershell
+   git clone https://github.com/your-repo/convoisum.git
+   cd convoisum
+   ```
+3. **Install dependencies**
+   ```powershell
+   pip install -r requirements.txt
+   ```
+4. **Run the app**
+   ```powershell
    python ephemeral.py
+   ```
 
+***
 
-3. Follow the on-screen menu:
+## Configuration
 
-Host (h), Join (j), Quit (q):
+- Ensure Tor ports (default 9050 for SOCKS proxy) are accessible and unblocked by firewalls.  
+- Update `requirements.txt` for any dependencies or security patches before installation.  
+- Customize `ephemeral.py` debug flag to enable verbose output during troubleshooting.
 
-- To **host** a chat:
-  - Choose `h`.
-  - The program starts a Tor hidden service and displays a `.onion` address and port.
-  - It prints your public key PEM; share this and the `.onion` address & port with your peer.
-  - Paste your peer’s public key PEM when prompted.
-  - Wait for the client to connect, then start chatting.
-  - Type `'exit'` to terminate the session cleanly.
+***
 
-- To **join** a chat:
-  - Choose `j`.
-  - Enter the host’s `.onion` address and port.
-  - The client displays its own public key PEM; send this to the host.
-  - Paste the host’s public key PEM when prompted.
-  - Begin chatting.
-  - Type `'exit'` to leave.
+## Usage Instructions
 
-## Using on Termux (Android)
+### Hosting a Chat Session
 
-1. Install Termux from [F-Droid](https://f-droid.org/en/packages/com.termux/).
+- Select `h` at the main menu.  
+- The app will create a Tor hidden service (it may take some time).  
+- You will see your `.onion` address and port, plus your PEM public key with a **security reminder to share it only securely**.  
+- Paste your peer’s public key PEM when asked (or type `cancel` to abort).  
+- Verify the SAS code with your peer out-of-band.  
+- Confirm to proceed, then wait for the peer to connect.  
+- Chat securely. Type `exit` to quit or `cancel` to abort.
 
-2. Update packages:
+### Joining a Chat Session
 
-   `pkg update && pkg upgrade`
+- Select `j`.  
+- Enter the host’s onion address and port.  
+- Your PEM public key will be shown and copied for sharing.  
+- Paste the host’s PEM key when requested.  
+- Verify SAS codes and confirm to safely start chatting.
 
-3. Install dependencies:
+***
 
-  ` pkg install python tor git`
-   `pip install cryptography PySocks`
+## Notes and Best Practices
 
+- Use **secure, authenticated channels** like video calls or face-to-face to exchange PEM keys for SAS validation.  
+- Always confirm SAS before proceeding to chat to mitigate MitM risks.  
+- Keep Tor running/Giving it time to bootstrap before using Convoisum.  
+- Limit chat message length to 512 characters for best stability & denial-of-service protection.  
+- Use the `cancel` command liberally to abort processes as needed.  
+- Run both peers behind reliable internet connections and hardened Tor setups.  
 
-4. Clone your repository or transfer your scripts to Termux home.
+***
 
-`git clone https://github.com/AnonymousDev12008/Ephemeral-chat.git`
+## Disclaimer
 
+Convoisum improves privacy and security but does not eliminate all risks. Users must practice secure behavior, confirm SAS codes carefully, and keep systems fully patched. No liability is accepted for misuse, misconfiguration, or evolving security threats.
 
-5. Make sure Tor is running (the script will start and manage Tor automatically, but you can also run it manually with `tor &`).
+***
 
-6. Run the chat app once after getting into the repos directory using the following command
-
-   `cd Ephemeral-chat`
-7. Now you can run the chat application by using the command
-
-   `python ephemeral.py`
-  
-
-8. Use the same menu-based workflow as desktop.
-
-9. **Note:** Closing the Termux session will stop all running processes, including Tor and your chat session, ensuring ephemeral cleanup.
-
-## Cleanup
-
-- All ephemeral keys, Tor hidden service directories, and subprocesses are cleaned automatically on chat exit or when you type `exit`.
-- To manually clean leftover temp files on Termux:
-
-   rm -rf /data/data/com.termux/files/usr/tmp/torchat_host_*
-
-
-Replace with the actual temp directory paths printed by the script if needed.
-
-## Security Considerations
-
-- Exchange public key PEM data *securely* out-of-band to avoid man-in-the-middle risks.
-- Tor provides strong network anonymity but is not invulnerable to global adversaries.
-- End-to-end encryption and ephemeral keys protect your chat content even if Tor traffic is observed.
-- Sessions end when you type `exit` or close the app; ephemeral data is destroyed.
-- Only one client connection supported at a time.
-- Keep Python packages and Tor updated.
-
-## License
-
-Distributed under the MIT License. See `LICENSE` for details.
-
-Contributions and suggestions are welcome!
-
----
-
-Feel free to contact the maintainer or open issues/pull requests on the Git repository.
-
-
-
-
-   
-
-
-
-
+Thank you for choosing Convoisum for your secure communications!
