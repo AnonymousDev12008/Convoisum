@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Convoisum – Privacy-focused ephemeral peer-to-peer chat over Tor v3
 """
@@ -17,7 +17,6 @@ import atexit
 import signal
 import socks
 import re
-import select
 
 import pyperclip  # For clipboard functionality
 
@@ -241,21 +240,38 @@ def run_host():
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
     print("[Info] Waiting for a peer to connect... (type 'cancel' to abort)")
-    # Accept in non-blocking mode with cancel
-    listener.setblocking(False)
-    while True:
-        ready = select.select([listener], [], [], 0.5)[0]
-        if ready:
-            conn, _ = listener.accept()
-            break
-        if sys.stdin in select.select([sys.stdin], [], [], 0):
-            cmd = sys.stdin.readline().strip().lower()
-            if cmd == "cancel":
-                print("[Info] Host cancelled. Returning to menu.")
-                listener.close()
-                return
+
+    stop_flag = threading.Event()
+
+    def input_monitor():
+        while not stop_flag.is_set():
+            try:
+                cmd = input()
+            except EOFError:
+                break
+            if cmd.strip().lower() == "cancel":
+                print("[Info] Host cancelled. Closing listener.")
+                stop_flag.set()
+                try:
+                    listener.close()
+                except Exception:
+                    pass
+                break
+
+    thread = threading.Thread(target=input_monitor, daemon=True)
+    thread.start()
+
+    try:
+        conn, _ = listener.accept()
+    except Exception:
+        if stop_flag.is_set():
+            return
+        else:
+            print("[Error] Listener encountered an exception.")
+            return
+
+    stop_flag.set()
     handle_chat(conn, session_key, nonce_ctr)
-    listener.close()
     print("[Info] Host session ended.")
 
 def run_client():
@@ -331,7 +347,6 @@ def run_client():
         print("[Info] Session aborted. Returning to main menu.")
         return
 
-    # Connect with cancel capability
     s = socks.socksocket()
     s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
     s.setblocking(False)
@@ -346,7 +361,6 @@ def run_client():
         except Exception as e:
             connect_err = e
             break
-        # Check for cancel input
         if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
             cmd = sys.stdin.readline().strip().lower()
             if cmd == "cancel":
