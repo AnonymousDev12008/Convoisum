@@ -1,5 +1,3 @@
-Below is a complete, ready-to-paste README.md for Convoisim v2. It includes a clickable Table of Contents with working quick links, clearly marked sections, and code blocks formatted in a readable palette style. Replace placeholders like <your-repo-url> with your actual repository URL before publishing.
-
 # Convoisim v2 — Privacy-Focused Ephemeral P2P Chat over Tor v3
 
 Convoisim is a command-line tool for secure, anonymous, and ephemeral chat routed through Tor v3 hidden services. Each session uses fresh end-to-end encryption, keys are bound to a session transcript, peers authenticate via a human-verifiable SAS, and no persistent data is kept by design.
@@ -214,4 +212,5 @@ v2.0.0 2025-08-24
 - Uses Tor v3 hidden services for network anonymity
 
 Contributions and independent reviews are welcome. For high-stakes use, consider a dedicated, hardened environment, pinned dependencies, and external security review.
+
 
