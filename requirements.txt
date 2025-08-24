@@ -1,3 +1,5 @@
-cryptography
-PySocks
-pyperclip
+cryptography==43.0.1
+
+PySocks==1.7.1
+
+pyperclip==1.9.0
