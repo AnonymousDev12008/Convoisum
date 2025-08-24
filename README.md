@@ -1,153 +1,216 @@
-# Convoisum
+Below is a complete, ready-to-paste README.md for Convoisim v2. It includes a clickable Table of Contents with working quick links, clearly marked sections, and code blocks formatted in a readable palette style. Replace placeholders like <your-repo-url> with your actual repository URL before publishing.
 
-### Privacy-Focused Ephemeral Peer-to-Peer Chat Over Tor v3
+# Convoisim v2 — Privacy-Focused Ephemeral P2P Chat over Tor v3
 
-***
+Convoisim is a command-line tool for secure, anonymous, and ephemeral chat routed through Tor v3 hidden services. Each session uses fresh end-to-end encryption, keys are bound to a session transcript, peers authenticate via a human-verifiable SAS, and no persistent data is kept by design.
+
+Note: v2 introduces framed messaging and strict sequencing and is not wire-compatible with v1. Both peers must run v2.
 
 ## Table of Contents
-
-1. [Overview](#overview)  
-2. [Key Features](#key-features)  
-3. [Security Recommendations](#security-recommendations)  
-4. [Prerequisites & Installation](#prerequisites--installation)  
-   - [Linux / Termux Setup](#linux--termux-setup)  
-   - [Windows PowerShell Setup](#windows-powershell-setup)  
-5. [Configuration](#configuration)  
-6. [Usage Instructions](#usage-instructions)  
-   - [Hosting a Chat Session](#hosting-a-chat-session)  
-   - [Joining a Chat Session](#joining-a-chat-session)  
-7. [Notes and Best Practices](#notes-and-best-practices)  
-8. [Disclaimer](#disclaimer)  
-
-***
+- [Overview](#overview)
+- [What’s New in v200](#whats-new-in-v200)
+- [Security Model and Strength](#security-model-and-strength)
+- [Security Recommendations](#security-recommendations)
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [Linux](#linux)
+  - [Windows PowerShell](#windows-powershell)
+  - [Termux Android](#termux-android)
+- [Usage](#usage)
+  - [Hosting a Chat Session](#hosting-a-chat-session)
+  - [Joining a Chat Session](#joining-a-chat-session)
+  - [Chat Controls](#chat-controls)
+- [Troubleshooting](#troubleshooting)
+- [Quick Links](#quick-links)
+- [Release Notes](#release-notes)
+- [License and Acknowledgments](#license-and-acknowledgments)
 
 ## Overview
+- Ephemeral Tor v3 hidden services (unique .onion per session)
+- ECDH P-256 key agreement with transcript-bound HKDF derivation
+- AES-GCM authenticated encryption, per-sender nonces via secure counter
+- Strict per-direction sequence numbers bound via AEAD associated data
+- 6-word SAS for human verification (~48 bits)
+- No persistent logs or transcripts; temporary files are removed on exit
 
-Convoisum is a command-line chat tool designed to enable **secure, anonymous, and ephemeral conversations** routed through the Tor v3 network’s hidden services. It uses **strong end-to-end encryption**, **manual SAS verification**, and **Tor anonymity** features to protect user privacy and prevent common network attacks.
+## What’s New in v2.0.0
+- Security
+  - Length-prefixed framing to prevent TCP boundary issues
+  - Strict per-direction sequence numbers bound via AEAD associated data (replay/out-of-order mitigation)
+  - Transcript-derived salts for HKDF (bind session key and SAS to context)
+  - Stronger SAS: 6 words from a 256-word list (~48 bits)
+  - Quiet key validation (no sensitive prints)
+  - Hardened Tor host config (no SocksPort to avoid conflicts, ClientOnly=1)
+- Reliability
+  - Host pre-binds a local port before creating the onion service
+- UX/Safety
+  - Clipboard copying disabled by default (opt-in)
+- Compatibility
+  - Not wire-compatible with v1; both peers must use v2
 
-***
-
-## Key Features
-
-- Creates ephemeral Tor hidden services with unique .onion addresses  
-- Secure peer authentication via public key exchange and SAS verification  
-- Clipboard support for easy key sharing with security reminders  
-- Role selection: host or join chat sessions  
-- Length-limiting chat messages to prevent abuse  
-- Cancel commands at almost every step for safety  
-- Clear, consistent tagged console prompts and statuses  
-- Cross-platform with support for Linux, Windows PowerShell, and Termux
-
-***
+## Security Model and Strength
+- Cryptography
+  - Key agreement: ECDH over P-256 SECP256R1
+  - KDF: HKDF-SHA256 with transcript-derived salt and info bindings
+  - AEAD: AES-GCM with 96-bit nonces (per-sender, never reused)
+  - SAS: 6-word code from 256-word list (~48 bits) to detect MitM
+- Protocol properties
+  - Transcript binding includes role ordering, both DER-encoded public keys, onion, and port
+  - Strict, monotonic per-direction sequence numbers are incorporated as AEAD associated data
+  - Length-prefixed frames ensure robust message boundaries over TCP
+- Out of scope
+  - Endpoint compromise (malware, keyloggers, clipboard snoopers)
+  - Global traffic correlation attacks on Tor
+  - Physical access and live memory forensics
 
 ## Security Recommendations
+- Verify the SAS over a trusted channel (e.g., in-person or known-identity video call). Any mismatch should immediately abort the session.
+- Never exchange public keys or SAS via the same chat channel; use a separate authenticated channel.
+- Keep Tor and the OS fully updated; avoid any clearnet fallback.
+- For sensitive use, run inside an isolated VM/container; disable clipboard sharing.
+- Leave clipboard copying disabled (default). If enabling, ensure the environment is trusted.
+- Keep sessions short and share only necessary information.
 
-- Always **exchange public keys through a secure, authenticated channel** such as a video call to prevent man-in-the-middle attacks.  
-- Confirm the SAS string displayed on both sides before chatting.  
-- Keep Tor and all system software updated.  
-- Prefer ephemeral sessions with minimal persistent information.  
-- Avoid sending overly long messages to maintain stability and reduce attack surface.
+## Requirements
+- Python 3.10+ recommended
+- Tor installed and available on PATH
+- Python packages:
+  - cryptography
+  - PySocks
+  - pyperclip optional
 
-***
+Example requirements.txt:
+```text
+cryptography==43.0.1
+PySocks==1.7.1
+pyperclip==1.9.0
+```
 
-## Prerequisites & Installation
+## Installation
 
-### Linux / Termux Setup
+### Linux
+Update system:
+```bash
+sudo apt update && sudo apt upgrade -y
+```
 
-1. **Update & Upgrade system packages**
-   ```bash
-   pkg update && pkg upgrade    # Termux
-   sudo apt update && sudo apt upgrade -y   # Debian/Ubuntu Linux
-   ```
-2. **Install required tools**
-   ```bash
-   pkg install python git tor rust -y    # Termux
-   sudo apt install python3 python3-pip git tor rustc build-essential -y   # Linux
-   ```
-3. **Clone and install Convoisum**
-   ```bash
-   git clone https://github.com/AnonymousDev12008/convoisum.git
-   cd convoisum
-   pip3 install -r requirements.txt
-   ```
-4. **Start Tor daemon manually if desired**
-   ```bash
-   tor &
-   ```
-   Or let the app start Tor automatically.
+Install prerequisites:
+```bash
+sudo apt install -y python3 python3-pip git tor
+```
 
-***
+Clone and install:
+```bash
+git clone <your-repo-url>
+cd <repo>
+pip3 install -r requirements.txt
+```
 
-### Windows PowerShell Setup
+Notes:
+- Ensure tor is on PATH; otherwise start it manually before use.
 
-1. **Install prerequisites**
-   - Install [Python 3.x](https://www.python.org/downloads/windows/) and add it to your PATH  
-   - Install [Git for Windows](https://gitforwindows.org/)  
-   - Install [Tor Expert Bundle](https://www.torproject.org/download/tor/) and run tor.exe manually or as service  
+### Windows PowerShell
+Install:
+- Python 3.x added to PATH
+- Git for Windows
+- Tor Expert Bundle (ensure tor.exe is on PATH or note its full path)
 
-2. **Clone the repository**
-   ```powershell
-   git clone https://github.com/AnonymousDev12008/convoisum.git
-   cd convoisum
-   ```
-3. **Install dependencies**
-   ```powershell
-   pip install -r requirements.txt
-   ```
-4. **Run the app**
-   ```powershell
-   python ephemeral.py
-   ```
+Clone and install:
+```powershell
+git clone <your-repo-url>
+cd <repo>
+pip install -r requirements.txt
+```
 
-***
+Notes:
+- If tor.exe isn’t found, start Tor manually before using the app.
+- Use Windows Terminal/PowerShell with UTF-8 for best results.
 
-## Configuration
+### Termux Android
+Update and install:
+```bash
+pkg update && pkg upgrade -y
+pkg install -y python git tor
+```
 
-- Ensure Tor ports (default 9050 for SOCKS proxy) are accessible and unblocked by firewalls.  
-- Update `requirements.txt` for any dependencies or security patches before installation.  
-- Customize `ephemeral.py` debug flag to enable verbose output during troubleshooting.
+Clone and install:
+```bash
+git clone <your-repo-url>
+cd <repo>
+pip install -r requirements.txt
+```
 
-***
+Notes:
+- Allow enough time for Tor to bootstrap; keep Termux awake during service creation.
 
-## Usage Instructions
+## Usage
+Run:
+```bash
+python3 ephemeral.py
+```
+
+Main menu:
+- h   Host a session and create a Tor v3 onion service
+- j   Join a session via Tor SOCKS 127.0.0.1:9050
+- q   Quit
 
 ### Hosting a Chat Session
-
-- Select `h` at the main menu.  
-- The app will create a Tor hidden service (it may take some time).  
-- You will see your `.onion` address and port, plus your PEM public key with a **security reminder to share it only securely**.  
-- Paste your peer’s public key PEM when asked (or type `cancel` to abort).  
-- Verify the SAS code with your peer out-of-band.  
-- Confirm to proceed, then wait for the peer to connect.  
-- Chat securely. Type `exit` to quit or `cancel` to abort.
+1) Choose h
+2) The app pre-binds a local port, starts an onion service, and shows:
+   - Onion address and port
+   - Your public key PEM
+   - SAS (6 words) after both PEMs are provided and the session key is derived
+3) Share your PEM via a trusted channel
+4) Paste the peer’s PEM when prompted
+5) Verify SAS matches over the trusted channel; proceed only on match
+6) Wait for the peer to connect and chat
 
 ### Joining a Chat Session
+1) Choose j
+2) Enter the host onion and port
+3) The app shows your public key PEM; share it via a trusted channel if needed
+4) Paste the host’s PEM when prompted
+5) Verify SAS matches over the trusted channel; proceed only on match
+6) Begin chatting
 
-- Select `j`.  
-- Enter the host’s onion address and port.  
-- Your PEM public key will be shown and copied for sharing.  
-- Paste the host’s PEM key when requested.  
-- Verify SAS codes and confirm to safely start chatting.
+### Chat Controls
+- Type a message and press Enter to send
+- Type exit to end the session
+- Type cancel during prompts to abort
+- Messages are limited to 512 characters
 
-***
+## Troubleshooting
+- Tor not found
+  - Install Tor and ensure tor or tor.exe is on PATH
+- Tor not bootstrapping
+  - Start Tor first; confirm SOCKS at 127.0.0.1:9050
+- Connection fails or stalls
+  - Verify onion address/port; ensure both peers are online and Tor is running
+  - Check local firewall rules
+- SAS mismatch
+  - Abort immediately; do not proceed
 
-## Notes and Best Practices
+## Quick Links
+- [Overview](#overview)
+- [What’s New](#whats-new-in-v200)
+- [Security Model](#security-model-and-strength)
+- [Security Recommendations](#security-recommendations)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Troubleshooting](#troubleshooting)
+- [Release Notes](#release-notes)
+- [License](#license-and-acknowledgments)
 
-- Use **secure, authenticated channels** like video calls or face-to-face to exchange PEM keys for SAS validation.  
-- Always confirm SAS before proceeding to chat to mitigate MitM risks.  
-- Keep Tor running/Giving it time to bootstrap before using Convoisum.  
-- Limit chat message length to 512 characters for best stability & denial-of-service protection.  
-- Use the `cancel` command liberally to abort processes as needed.  
-- Run both peers behind reliable internet connections and hardened Tor setups.  
+## Release Notes
+v2.0.0 2025-08-24
+- Security: framed messaging, strict sequencing, transcript-derived salts, stronger SAS, quiet validation
+- Hardening: Tor host config, pre-bind local port
+- UX: Clipboard optional, default off
+- Compatibility: Not wire-compatible with v1
 
-***
+## License and Acknowledgments
+- License: MIT
+- Built with Python and cryptography
+- Uses Tor v3 hidden services for network anonymity
 
-## Disclaimer
-
-Convoisum improves privacy and security but does not eliminate all risks. Users must practice secure behavior, confirm SAS codes carefully, and keep systems fully patched. No liability is accepted for misuse, misconfiguration, or evolving security threats.
-
-***
-
-Thank you for choosing Convoisum for your secure communications!
-
-
+Contributions and independent reviews are welcome. For high-stakes use, consider a dedicated, hardened environment, pinned dependencies, and external security review.
