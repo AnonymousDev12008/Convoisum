@@ -101,8 +101,8 @@ sudo apt install -y python3 python3-pip git tor
 
 Clone and install:
 ```bash
-git clone <your-repo-url>
-cd <repo>
+git clone https://github.com/AnonymousDev12008/Convoisum.git
+cd Convoisum
 pip3 install -r requirements.txt
 ```
 
@@ -117,8 +117,8 @@ Install:
 
 Clone and install:
 ```powershell
-git clone <your-repo-url>
-cd <repo>
+git clone https://github.com/AnonymousDev12008/Convoisum.git
+cd Convoisum
 pip install -r requirements.txt
 ```
 
@@ -135,8 +135,8 @@ pkg install -y python git tor
 
 Clone and install:
 ```bash
-git clone <your-repo-url>
-cd <repo>
+git clone https://github.com/AnonymousDev12008/Convoisum.git
+cd Convoisum
 pip install -r requirements.txt
 ```
 
@@ -214,3 +214,4 @@ v2.0.0 2025-08-24
 - Uses Tor v3 hidden services for network anonymity
 
 Contributions and independent reviews are welcome. For high-stakes use, consider a dedicated, hardened environment, pinned dependencies, and external security review.
+
