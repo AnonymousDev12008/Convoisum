@@ -207,7 +207,7 @@ v2.0.0 2025-08-24
 - Compatibility: Not wire-compatible with v1
 
 ## License and Acknowledgments
-- License: GNU AFFERO GENERAL PUBLIC LISCENCE 
+- License: GNU AFFERO GENERAL PUBLIC LICENSE 
 - Built with Python and cryptography
 - Uses Tor v3 hidden services for network anonymity
 
