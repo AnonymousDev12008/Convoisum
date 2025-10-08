@@ -540,7 +540,7 @@ def run_client():
 def main_menu():
     while True:
         print("""
-===== Convoisim-v2 =====
+===== Convoisum-v2 =====
 Hide | Chat | Erase | Repeat
 
 [h] Host  [j] Join  [q] Quit
@@ -559,3 +559,4 @@ Hide | Chat | Erase | Repeat
 
 if __name__ == "__main__":
     main_menu()
+
