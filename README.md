@@ -1,6 +1,6 @@
-# Convoisim v2 — Privacy-Focused Ephemeral P2P Chat over Tor v3
+# Convoisum v2 — Privacy-Focused Ephemeral P2P Chat over Tor v3
 
-Convoisim is a command-line tool for secure, anonymous, and ephemeral chat routed through Tor v3 hidden services. Each session uses fresh end-to-end encryption, keys are bound to a session transcript, peers authenticate via a human-verifiable SAS, and no persistent data is kept by design.
+Convoisum is a command-line tool for secure, anonymous, and ephemeral chat routed through Tor v3 hidden services. Each session uses fresh end-to-end encryption, keys are bound to a session transcript, peers authenticate via a human-verifiable SAS, and no persistent data is kept by design.
 
 Note: v2 introduces framed messaging and strict sequencing and is not wire-compatible with v1. Both peers must run v2.
 
