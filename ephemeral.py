@@ -1,295 +1,574 @@
-# Convoisim-v2 crypto_core.py
-
 import os
+import sys
+import socket
 import threading
-import ctypes
-from typing import Optional
+import tempfile
+import subprocess
+import time
+import random
+import shutil
+import platform
+import atexit
+import signal
+import re
+import select
+import base64
+from typing import Optional, Tuple, List
 
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.hashes import Hash, SHA256
+import socks  # PySocks
+try:
+    import pyperclip
+except Exception:
+    pyperclip = None
+
+from cryptography.hazmat.primitives import serialization
+
+from crypto_core import (
+    generate_keys,
+    serialize_public_key,
+    deserialize_public_key,
+    derive_shared_key_with_context,
+    derive_sas,
+    encrypt_message,
+    decrypt_message,
+    SecureNonceCounter,
+    SecureBytes,
+)
+
+DEBUG = False
+USE_CLIPBOARD = False  # Default off for safety
+MAX_MESSAGE_LENGTH = 512
+
+_last_tmp_dir = None
+_last_tor_proc = None
 
 
-# -------- Secure byte handling --------
+# -------- Cleanup and signals --------
 
-class SecureBytes:
-    """
-    SecureBytes stores sensitive data in a mutable buffer and supports explicit zeroization.
-    Note: Any time .bytes() is called, a new Python bytes object is created; avoid persisting it.
-    Always destroy() long-lived SecureBytes as soon as you are done.
-    """
-    def __init__(self, data: bytes):
-        self.size = len(data)
-        self.buf = (ctypes.c_ubyte * self.size)()
-        if self.size:
-            ctypes.memmove(self.buf, data, self.size)
-        self._destroyed = False
-
-    def bytes(self) -> bytes:
-        if self._destroyed:
-            raise ValueError("SecureBytes has been destroyed")
-        return bytes(self.buf[:self.size])
-
-    def destroy(self):
-        if not self._destroyed and self.size:
-            ctypes.memset(self.buf, 0, self.size)
-            self._destroyed = True
-
-    def __del__(self):
+def cleanup():
+    global _last_tor_proc, _last_tmp_dir
+    if _last_tor_proc:
         try:
-            self.destroy()
+            _last_tor_proc.terminate()
         except Exception:
             pass
+    if _last_tmp_dir and os.path.isdir(_last_tmp_dir):
+        shutil.rmtree(_last_tmp_dir, ignore_errors=True)
 
-
-def secure_delete(data: bytes):
-    """
-    WARNING: Python bytes are immutable; there may be multiple copies.
-    This function zeroes a temporary buffer and does NOT clear the original bytes object.
-    Prefer SecureBytes for secrets you control.
-    """
-    if not isinstance(data, (bytes, bytearray)):
-        return
-    if len(data) == 0:
-        return
-    tmp = ctypes.create_string_buffer(data, len(data))
-    ctypes.memset(tmp, 0, len(data))
-
-
-# -------- Public key operations --------
-
-def generate_keys():
-    """Generate ECDH key pair on P-256 curve."""
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key()
-    return private_key, public_key
-
-
-def serialize_public_key(public_key) -> bytes:
-    """Serialize public key to PEM."""
-    return public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-
-
-def deserialize_public_key(pem_bytes: bytes):
-    """Deserialize and validate public key from PEM."""
+atexit.register(cleanup)
+for sig in (signal.SIGINT, signal.SIGTERM):
     try:
-        public_key = serialization.load_pem_public_key(pem_bytes)
-        if not validate_public_key(public_key):
-            raise ValueError("Invalid public key")
-        return public_key
-    except Exception as e:
-        raise ValueError(f"Failed to deserialize public key: {e}")
-
-
-def validate_public_key(public_key) -> bool:
-    """
-    Validate public key is on P-256 curve and not identity.
-    No prints; returns boolean only.
-    """
-    try:
-        nums = public_key.public_numbers()
-        # Reject identity (0,0)
-        if nums.x == 0 and nums.y == 0:
-            return False
-        # Enforce P-256
-        if not isinstance(nums.curve, ec.SECP256R1):
-            return False
-        return True
-    except Exception:
-        return False
-
-
-# -------- Transcript-bound salts --------
-
-def _salt_from_transcript(label: bytes, transcript: bytes) -> bytes:
-    """
-    Derive a 16-byte salt from the transcript and a label, to bind KDF to session context.
-    """
-    h = Hash(SHA256())
-    h.update(label)
-    h.update(b"|")
-    h.update(transcript)
-    return h.finalize()[:16]
-
-
-# -------- Session key and SAS derivation --------
-
-def derive_shared_key_with_context(private_key, peer_public_key, session_context: bytes) -> SecureBytes:
-    """
-    Derive shared session key using ECDH + HKDF with transcript-derived salt and info binding.
-    """
-    if not validate_public_key(peer_public_key):
-        raise ValueError("Invalid peer public key")
-
-    shared_secret = private_key.exchange(ec.ECDH(), peer_public_key)
-    secret_buf = SecureBytes(shared_secret)
-    try:
-        salt = _salt_from_transcript(b"convoisim-v2-session-salt", session_context)
-        derived = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            info=b"convoisim-v2-session|" + session_context
-        ).derive(secret_buf.bytes())
-        return SecureBytes(derived)
-    finally:
-        secret_buf.destroy()
-
-
-# 256-entry SAS word list: keep stable; ASCII lowercase; avoid homophones.
-SAS_WORDS = [
-    "able","acid","aged","also","area","army","away","baby",
-    "back","bake","ball","band","bank","base","bath","bear",
-    "beat","been","beer","bell","belt","bend","best","bill",
-    "bird","bite","blue","boat","body","bomb","bond","bone",
-    "book","boom","boot","born","boss","both","bowl","bulk",
-    "burn","bush","busy","cafe","cake","calm","camp","card",
-    "care","case","cash","cast","cell","chat","chip","city",
-    "club","coal","coat","code","cold","come","cook","cool",
-    "cope","core","cost","crew","crop","dark","data","date",
-    "dawn","days","dead","deal","dean","dear","debt","deep",
-    "deer","desk","dial","dick","diet","disk","done","doom",
-    "door","down","draw","drew","drop","drug","dual","duty",
-    "each","earn","ease","east","easy","edge","else","even",
-    "ever","evil","exit","face","fact","fail","fair","fall",
-    "farm","fast","fate","fear","feed","feel","fell","felt",
-    "file","fill","film","find","fine","fire","firm","fish",
-    "five","flag","flat","flow","fold","folk","food","foot",
-    "form","fort","four","free","from","fuel","full","fund",
-    "gain","game","gate","gaze","gear","gene","gift","girl",
-    "give","glad","goal","goes","gold","golf","gone","good",
-    "gray","grew","grid","grow","gulf","hair","half","hall",
-    "hand","hang","hard","harm","hate","have","head","hear",
-    "heat","held","hell","help","here","hero","high","hill",
-    "hire","hold","hole","holy","home","hope","host","hour",
-    "huge","hung","hunt","hurt","idea","inch","into","iron",
-    "item","jack","jane","jean","john","join","jump","jury",
-    "just","keen","keep","kept","kick","kill","kind","king",
-    "knee","knew","know","lack","lady","laid","lake","land",
-    "lane","last","late","lead","leaf","lean","left","lend",
-    "less","life","lift","like","limb","line","link","lips",
-    "list","live","load","loan","lock","logo","long","look",
-    "lord","lose","loss","lost","lots","love","luck","luke",
-    "made","mail","main","make","male","many","mark","mass",
-    "meal","mean","meat","meet","menu","mere","mess","mile",
-    "milk","mind","mine","miss","moon","more","most","move",
-    "much","must","name","navy","near","neck","need","news",
-    "next","nice","nick","nine","none","nose","note","okay",
-    "once","only","onto","open","oral","ours","over","pack",
-    "page","paid","pain","pair","palm","park","part","pass",
-    "past","path","peak","pick","pink","pipe","plan","play",
-    "plot","plug","plus","poll","pool","poor","port","pose",
-    "post","pour","pray","prep","pull","pure","push","race",
-    "rail","rain","rare","rate","read","real","rear","rely",
-    "rent","rest","rice","rich","ride","ring","rise","risk",
-    "road","rock","role","roll","roof","room","root","rope",
-    "rose","ruin","rule","rush","safe","said","sake","sale",
-    "salt","same","sand","save","seat","seed","seek","seem",
-    "seen","self","sell","send","sent","sept","ship","shop",
-    "shot","show","shut","sick","side","sign","site","size",
-    "skin","slip","slow","snow","soft","soil","sold","sole",
-    "some","song","soon","sort","soul","spot","star","stay",
-    "step","stop","such","suit","sure","take","tale","talk",
-    "tall","tank","tape","task","taxi","team","tech","tell",
-    "tend","term","test","text","than","that","them","then",
-    "they","thin","this","thus","tide","tier","till","time",
-    "tiny","told","toll","tone","tony","took","tool","tour",
-    "town","tree","trip","true","tune","turn","twin","type",
-    "unit","upon","used","user","used","vary","vast","very",
-    "vice","view","vote","wage","wait","wake","walk","wall",
-    "want","ward","warm","wash","wave","ways","weak","wear",
-    "week","well","went","were","west","what","when","whom",
-    "wide","wife","wild","will","wind","wine","wing","wire",
-    "wise","wish","with","wolf","wood","wool","word","wore",
-    "work","yard","yeah","year","york","your"
-]
-
-def derive_sas(session_key: SecureBytes, transcript: bytes) -> str:
-    """
-    Derive 6-word SAS (~48 bits) from a 256-word list with transcript-bound salt.
-    """
-    salt = _salt_from_transcript(b"convoisim-v2-sas-salt", transcript)
-    sas_material = HKDF(
-        algorithm=hashes.SHA256(),
-        length=6,
-        salt=salt,
-        info=b"convoisim-v2-sas"
-    ).derive(session_key.bytes() + transcript)
-    indices = list(sas_material)  # 6 bytes -> 6 indices 0..255
-    return "-".join(SAS_WORDS[i] for i in indices)
-
-
-# -------- Nonce and AEAD --------
-
-class SecureNonceCounter:
-    """
-    Thread-safe nonce counter: 8-byte random base + 4-byte counter => 12-byte nonce for AES-GCM.
-    Per-sender instance per session to avoid reuse.
-    """
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.counter = 0
-        self.base_nonce = os.urandom(8)
-
-    def get_next_nonce(self) -> bytes:
-        with self.lock:
-            counter_bytes = self.counter.to_bytes(4, 'big')
-            nonce = self.base_nonce + counter_bytes
-            self.counter += 1
-            if self.counter >= 2**32:
-                self.counter = 0
-                self.base_nonce = os.urandom(8)
-            return nonce
-
-
-def encrypt_message(key: SecureBytes, plaintext: str, nonce_counter: SecureNonceCounter, sequence_num: int = 0) -> bytes:
-    """
-    Encrypt message with AES-GCM; associated_data carries the monotonic sequence number (replay/ordering).
-    """
-    if key._destroyed:
-        raise ValueError("Cannot encrypt with destroyed key")
-    aesgcm = AESGCM(key.bytes())
-    nonce = nonce_counter.get_next_nonce()
-    associated_data = sequence_num.to_bytes(8, 'big')
-    try:
-        ct = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), associated_data)
-        return nonce + ct
-    except Exception as e:
-        raise ValueError(f"Encryption failed: {e}")
-
-
-def _dummy_decrypt(key: SecureBytes):
-    try:
-        AESGCM(key.bytes()).decrypt(b"\x00"*12, b"\x00"*32, b"\x00"*8)
+        signal.signal(sig, lambda *_: sys.exit(0))
     except Exception:
         pass
 
 
-def decrypt_message(key: SecureBytes, encrypted_message: bytes, sequence_num: int = 0) -> Optional[str]:
-    """
-    Decrypt with AES-GCM and verify sequence via associated_data.
-    Returns None on failure; constant-time-ish failure path via dummy decrypt.
-    """
-    if key._destroyed:
-        raise ValueError("Cannot decrypt with destroyed key")
+# -------- Validation helpers --------
 
-    if len(encrypted_message) < 28:  # 12-byte nonce + 16-byte tag minimum
-        _dummy_decrypt(key)
+def strict_onion_v3_check(addr: str) -> bool:
+    return bool(re.fullmatch(r"[a-z2-7]{56}.onion", addr.strip().lower()))
+
+def validate_port(s: str) -> Optional[int]:
+    try:
+        p = int(s)
+        return p if 1024 <= p <= 65535 else None
+    except Exception:
         return None
 
-    aesgcm = AESGCM(key.bytes())
-    nonce = encrypted_message[:12]
-    ct = encrypted_message[12:]
-    associated_data = sequence_num.to_bytes(8, 'big')
+def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
+    while True:
+        print(f"\n{prompt} (enter full PEM block including headers or type 'cancel' to abort)")
+        lines = []
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                print("[!] Incomplete PEM; returning to menu.")
+                return None
+            line = line.rstrip("\n")
+            if line.lower() == "cancel":
+                print("[Info] Input cancelled. Returning to main menu.\n")
+                return None
+            lines.append(line)
+            if line == "-----END PUBLIC KEY-----":
+                break
+        pem = "\n".join(lines) + "\n"
+        if not pem.startswith("-----BEGIN PUBLIC KEY-----"):
+            print("[Error] Invalid PEM format. Please try again or type 'cancel' to abort.\n")
+            continue
+        return pem.encode()
+
+def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+# -------- Framing (length-prefixed messages) --------
+
+def send_frame(sock: socket.socket, data: bytes) -> None:
+    header = len(data).to_bytes(4, 'big')
+    sock.sendall(header + data)
+
+def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]:
+    frames = []
+    try:
+        chunk = sock.recv(4096)
+    except Exception:
+        return None
+    if not chunk:
+        return None  # peer closed
+    buffer.extend(chunk)
+    while True:
+        if len(buffer) < 4:
+            break
+        length = int.from_bytes(buffer[:4], 'big')
+        if length < 0 or length > 10_000_000:
+            raise ValueError("Invalid frame length")
+        if len(buffer) < 4 + length:
+            break
+        frame = bytes(buffer[4:4+length])
+        del buffer[:4+length]
+        frames.append(frame)
+    return frames
+
+
+# -------- Tor helpers (hardened) --------
+
+def start_tor_hidden_service(local_port: int):
+    """
+    Hardened torrc:
+    - No SocksPort (avoids conflicts with existing Tor)
+    - ClientOnly 1
+    """
+    global _last_tmp_dir, _last_tor_proc
+    tmp = tempfile.mkdtemp(prefix="convoisim_v2_")
+    os.chmod(tmp, 0o700)
+    _last_tmp_dir = tmp
+    hs = os.path.join(tmp, "hs")
+    os.makedirs(hs, 0o700)
+    torrc = os.path.join(tmp, "torrc")
+    with open(torrc, "w") as f:
+        f.write(f"""
+HiddenServiceDir {hs}
+HiddenServicePort {local_port} 127.0.0.1:{local_port}
+HiddenServiceVersion 3
+ClientOnly 1
+""")
+    try:
+        proc = subprocess.Popen(
+            ["tor", "-f", torrc],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=not platform.system().lower().startswith("win")
+        )
+    except FileNotFoundError:
+        print("[!] Tor not found.")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, None
+
+    hostname = os.path.join(hs, "hostname")
+    for i in range(120):
+        if os.path.exists(hostname):
+            try:
+                onion = open(hostname).read().strip()
+            except Exception:
+                onion = None
+            time.sleep(2)
+            _last_tor_proc = proc
+            return proc, onion, tmp
+        if i % 10 == 0:
+            print(f"[Info] Waiting for Tor HS... {i+1}s elapsed")
+        time.sleep(1)
 
     try:
-        pt = aesgcm.decrypt(nonce, ct, associated_data)
-        return pt.decode("utf-8")
+        proc.terminate()
     except Exception:
-        _dummy_decrypt(key)
-        return None
+        pass
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("[!] HS creation timeout")
+    return None, None, None
+
+
+# -------- Transcript binding --------
+
+def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) -> bytes:
+    """
+    Directional transcript: host DER || client DER || onion || port(2B big-endian)
+    """
+    return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
+
+
+# -------- Chat logic (strict sequencing + framing + logging) --------
+
+def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: SecureNonceCounter):
+    """
+    Strict in-order, framed chat:
+    - Frames are length-prefixed.
+    - Sequence numbers are per-direction, strictly monotonic (0,1,2,...).
+    - Associated data in AEAD binds the sequence.
+    - Logs encrypted frames info for demo/testing.
+    """
+    stop = threading.Event()
+    seq_send = 0
+    seq_recv = 0
+    recv_buffer = bytearray()
+
+    def recv_loop():
+        nonlocal seq_recv
+        sock.setblocking(True)
+        while not stop.is_set():
+            try:
+                frames = recv_frames(sock, recv_buffer)
+                if frames is None:
+                    print("\n[!] Peer disconnected")
+                    stop.set()
+                    return
+            except ConnectionResetError:
+                print("\n[!] Connection reset by peer")
+                stop.set()
+                return
+            except Exception as e:
+                print(f"\n[!] recv error: {e}")
+                stop.set()
+                return
+
+            for data in frames:
+                # Log received encrypted data info
+                nonce = data[:12]
+                ct = data[12:]
+                print(f"[Recv] Seq: {seq_recv}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct).decode()}")
+
+                # Decrypt with expected sequence number
+                msg = decrypt_message(session_key, data, seq_recv)
+                if msg is None:
+                    print("\n[!] Decryption failed or out-of-order/replay detected")
+                    stop.set()
+                    return
+                print(f"\nPeer (Seq {seq_recv}): {msg}\n")
+                print("You: ", end="", flush=True)
+                if msg.strip().lower() == "exit":
+                    stop.set()
+                    return
+                seq_recv += 1
+
+    threading.Thread(target=recv_loop, daemon=True).start()
+
+    while not stop.is_set():
+        try:
+            msg = input("You: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[Info] Exiting chat.")
+            stop.set()
+            break
+
+        if msg.strip().lower() == "cancel":
+            print("[Info] Chat cancelled.")
+            stop.set()
+            break
+
+        if len(msg) > MAX_MESSAGE_LENGTH:
+            print(f"[Error] Message too long (max {MAX_MESSAGE_LENGTH} chars). Please shorten.")
+            continue
+
+        ct = encrypt_message(session_key, msg, nonce_ctr, seq_send)
+
+        # Log sent encrypted data info
+        nonce = ct[:12]
+        ct_payload = ct[12:]
+        print(f"[Sent] Seq: {seq_send}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct_payload).decode()}")
+
+        send_frame(sock, ct)
+
+        if msg.strip().lower() == "exit":
+            print("\n[Info] You exited the chat.")
+            stop.set()
+
+        seq_send += 1
+
+    try:
+        sock.close()
+    except Exception:
+        pass
+    print("\n[Info] Chat session ended.\n")
+
+
+# -------- Host/client flows --------
+
+def _prebind_local_listener() -> Tuple[Optional[socket.socket], Optional[int]]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    port = None
+    for _ in range(30):
+        p = random.randint(15000, 20000)
+        try:
+            listener.bind(("127.0.0.1", p))
+            port = p
+            break
+        except OSError:
+            continue
+    if port is None:
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return None, None
+    listener.listen(1)
+    return listener, port
+
+
+def run_host():
+    print("\n=== Host Mode (Convoisim-v2) ===")
+
+    # Pre-bind port before creating HS to avoid conflicts
+    listener, port = _prebind_local_listener()
+    if listener is None:
+        print("[Error] Could not find an available local port")
+        return
+
+    print("[Info] Starting Tor HS... please wait")
+    proc, onion, tmp = start_tor_hidden_service(port)
+    if not proc or not onion:
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return
+    print("[Success] HS ready\n")
+
+    print("[Warning] THIS IS YOUR PUBLIC KEY PEM. SHARE IT SECURELY ONLY (e.g., video call).")
+    print(f"Onion address: {onion}")
+    print(f"Port: {port}")
+
+    priv, pub = generate_keys()
+    nonce_ctr = SecureNonceCounter()
+    pem = serialize_public_key(pub).decode()
+
+    if USE_CLIPBOARD and pyperclip:
+        try:
+            pyperclip.copy(pem)
+            print("\n[Info] PEM copied to clipboard\n")
+        except Exception:
+            print("\n[Warning] Failed to copy PEM to clipboard, please copy manually\n")
+    else:
+        print("\n[Info] Clipboard copy disabled or unavailable\n")
+
+    print(pem)
+
+    peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
+    if not peer_pem:
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return
+
+    try:
+        peer_pub = deserialize_public_key(peer_pem)
+        print("[Success] Public key verified\n")
+    except ValueError as e:
+        print(f"[Error] {e}\n")
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return
+
+    transcript = build_transcript(
+        pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        peer_pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        onion, port
+    )
+
+    session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
+    sas = derive_sas(session_key, transcript)
+    print(f"SAS: {sas}")
+    if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
+        print("[Info] Aborted\n")
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return
+
+    print("[Info] Waiting for peer (type 'cancel' to abort):")
+    stop_flag = threading.Event()
+
+    def cancel_monitor():
+        while not stop_flag.is_set():
+            try:
+                cmd = sys.stdin.readline()
+            except EOFError:
+                break
+            if cmd.strip().lower() == "cancel":
+                stop_flag.set()
+                try:
+                    listener.close()
+                except Exception:
+                    pass
+                print("[Info] Host cancelled\n")
+                break
+
+    threading.Thread(target=cancel_monitor, daemon=True).start()
+    try:
+        conn, _ = listener.accept()
+        print("[Info] Peer connected. Starting chat session.\n")
+    except Exception:
+        if stop_flag.is_set():
+            return
+        print("[Error] Listener error\n")
+        return
+    finally:
+        stop_flag.set()
+        try:
+            listener.close()
+        except Exception:
+            pass
+
+    handle_chat(conn, session_key, nonce_ctr)
+
+
+def run_client():
+    print("\n=== Client Mode (Convoisim-v2) ===")
+    onion = input("[Prompt] Host Onion (.onion): ").strip()
+    if onion.lower() == "cancel":
+        print("[Info] Cancelled\n")
+        return
+    if not strict_onion_v3_check(onion):
+        print("[Error] Invalid onion\n")
+        return
+
+    port_s = input("[Prompt] Host port: ").strip()
+    if port_s.lower() == "cancel":
+        print("[Info] Cancelled\n")
+        return
+    port = validate_port(port_s)
+    if not port:
+        print("[Error] Invalid port\n")
+        return
+
+    if not is_listening("127.0.0.1", 9050):
+        print("[Info] Starting Tor... please wait")
+        try:
+            subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(20):
+                if is_listening("127.0.0.1", 9050):
+                    break
+                time.sleep(1)
+            else:
+                print("[Warning] Timeout waiting for Tor proxy\n")
+        except FileNotFoundError:
+            print("[!] Tor not found; start manually\n")
+            return
+
+    priv, pub = generate_keys()
+    nonce_ctr = SecureNonceCounter()
+    pem = serialize_public_key(pub).decode()
+
+    if USE_CLIPBOARD and pyperclip:
+        try:
+            pyperclip.copy(pem)
+            print("\n[Info] PEM copied to clipboard\n")
+        except Exception:
+            print("\n[Warning] Copy failed, copy manually\n")
+    else:
+        print("\n[Info] Clipboard copy disabled or unavailable\n")
+
+    print(pem)
+
+    peer_pem = read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
+    if not peer_pem:
+        return
+
+    try:
+        peer_pub = deserialize_public_key(peer_pem)
+        print("[Success] Public key verified\n")
+    except ValueError as e:
+        print(f"[Error] {e}\n")
+        return
+
+    transcript = build_transcript(
+        peer_pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        onion, port
+    )
+
+    session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
+    sas = derive_sas(session_key, transcript)
+    print(f"SAS: {sas}")
+    if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
+        print("[Info] Aborted\n")
+        return
+
+    s = socks.socksocket()
+    s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+    s.settimeout(10.0)
+    s.setblocking(True)
+    print("[Info] Connecting to peer... (type 'cancel' to abort)")
+    connect_err = None
+    stop = False
+
+    while True:
+        try:
+            s.connect((onion, port))
+            print("[Info] Connected! Start typing messages. Type 'exit' to quit.\n")
+            break
+        except BlockingIOError:
+            pass
+        except socket.timeout:
+            connect_err = socket.timeout("Connection timed out")
+            break
+        except Exception as e:
+            connect_err = e
+            break
+
+        try:
+            rlist, _, _ = select.select([sys.stdin], [], [], 0)
+        except Exception:
+            rlist = []
+        if sys.stdin in rlist:
+            cmd = sys.stdin.readline().strip().lower()
+            if cmd == "cancel":
+                stop = True
+                print("[Info] Connection cancelled\n")
+                break
+        if stop:
+            break
+        time.sleep(0.2)
+
+    if connect_err:
+        print(f"[Error] Connection failed: {connect_err}\n")
+        try:
+            s.close()
+        except Exception:
+            pass
+        return
+
+    if not stop:
+        handle_chat(s, session_key, nonce_ctr)
+
+
+# -------- Main menu --------
+
+def main_menu():
+    while True:
+        print("""
+===== Convoisum-v2 =====
+Hide | Chat | Erase | Repeat
+
+[h] Host  [j] Join  [q] Quit
+""")
+        choice = input("Choice: ").strip().lower()
+        if choice == "h":
+            run_host()
+        elif choice == "j":
+            run_client()
+        elif choice == "q":
+            print("[Info] Goodbye!\n")
+            break
+        else:
+            print("[Error] Enter 'h', 'j', or 'q'\n")
+
+
+if __name__ == "__main__":
+    main_menu()
