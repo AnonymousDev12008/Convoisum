@@ -13,7 +13,7 @@ import signal
 import re
 import select
 import base64
-from typing import Optional, Tuple, List
+from typing import Tuple,Optional, List
 import queue
 
 import socks  # PySocks
@@ -271,10 +271,11 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             result.append(('', "\n"))
         return result
     chat_text_control = FormattedTextControl(get_chat_text, focusable=False)
-    chat_window = Window(content=chat_text_control,
-                         wrap_lines=True,
-                         scrollbar=True,
-                         right_margins=[ScrollbarMargin()])
+    chat_window = Window(
+        content=chat_text_control,
+        wrap_lines=True,
+        right_margins=[ScrollbarMargin()]
+    )
     input_buffer = Buffer()
     def accept_text(buff):
         nonlocal stop, seq_send
