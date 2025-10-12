@@ -53,6 +53,7 @@ MAX_MESSAGE_LENGTH = 512
 _last_tmp_dir = None
 _last_tor_proc = None
 
+
 def cleanup():
     global _last_tor_proc, _last_tmp_dir
     if _last_tor_proc:
@@ -64,6 +65,7 @@ def cleanup():
     if _last_tmp_dir and os.path.isdir(_last_tmp_dir):
         shutil.rmtree(_last_tmp_dir, ignore_errors=True)
 
+
 atexit.register(cleanup)
 for sig in (signal.SIGINT, signal.SIGTERM):
     try:
@@ -71,8 +73,10 @@ for sig in (signal.SIGINT, signal.SIGTERM):
     except Exception:
         pass
 
+
 def strict_onion_v3_check(addr: str) -> bool:
     return bool(re.fullmatch(r"[a-z2-7]{56}\.onion", addr.strip().lower()))
+
 
 def validate_port(s: str) -> Optional[int]:
     try:
@@ -80,6 +84,7 @@ def validate_port(s: str) -> Optional[int]:
         return p if 1024 <= p <= 65535 else None
     except Exception:
         return None
+
 
 def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
     while True:
@@ -103,6 +108,7 @@ def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
             continue
         return pem.encode()
 
+
 def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -110,9 +116,11 @@ def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     except Exception:
         return False
 
+
 def send_frame(sock: socket.socket, data: bytes) -> None:
     header = len(data).to_bytes(4, 'big')
     sock.sendall(header + data)
+
 
 def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]:
     frames = []
@@ -135,6 +143,7 @@ def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]
         del buffer[:4+length]
         frames.append(frame)
     return frames
+
 
 def start_tor_hidden_service(local_port: int):
     global _last_tmp_dir, _last_tor_proc
@@ -182,8 +191,10 @@ ClientOnly 1
     print("[!] HS creation timeout\n")
     return None, None, None
 
+
 def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) -> bytes:
     return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
+
 
 def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: SecureNonceCounter):
     stop = threading.Event()
@@ -284,7 +295,9 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     threading.Thread(target=recv_loop, daemon=True).start()
 
-    chat_buffer = Buffer(read_only=True)
+    chat_buffer = Buffer()
+    chat_buffer.read_only = True  # Set read_only after creation to allow .text assignment
+
     chat_window = Window(
         content=BufferControl(buffer=chat_buffer),
         wrap_lines=True,
@@ -350,6 +363,7 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
                 if chat_window.render_info:
                     max_scroll = max(0, len(chat_buffer.document.lines) - chat_window.render_info.window_height)
+                    # Auto-scroll only if user is not scrolled up or already at bottom
                     if not user_scrolled_up or chat_window.vertical_scroll >= max_scroll:
                         chat_window.vertical_scroll = max_scroll
 
