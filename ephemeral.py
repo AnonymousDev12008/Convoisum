@@ -45,14 +45,14 @@ from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.filters import has_focus
 
 DEBUG = False
-USE_CLIPBOARD = False  # Default off for safety
+USE_CLIPBOARD = False
 MAX_MESSAGE_LENGTH = 512
 
 _last_tmp_dir = None
 _last_tor_proc = None
-
 
 def cleanup():
     global _last_tor_proc, _last_tmp_dir
@@ -65,7 +65,6 @@ def cleanup():
     if _last_tmp_dir and os.path.isdir(_last_tmp_dir):
         shutil.rmtree(_last_tmp_dir, ignore_errors=True)
 
-
 atexit.register(cleanup)
 for sig in (signal.SIGINT, signal.SIGTERM):
     try:
@@ -73,10 +72,8 @@ for sig in (signal.SIGINT, signal.SIGTERM):
     except Exception:
         pass
 
-
 def strict_onion_v3_check(addr: str) -> bool:
     return bool(re.fullmatch(r"[a-z2-7]{56}\.onion", addr.strip().lower()))
-
 
 def validate_port(s: str) -> Optional[int]:
     try:
@@ -84,7 +81,6 @@ def validate_port(s: str) -> Optional[int]:
         return p if 1024 <= p <= 65535 else None
     except Exception:
         return None
-
 
 def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
     while True:
@@ -108,7 +104,6 @@ def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
             continue
         return pem.encode()
 
-
 def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -116,11 +111,9 @@ def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     except Exception:
         return False
 
-
 def send_frame(sock: socket.socket, data: bytes) -> None:
     header = len(data).to_bytes(4, 'big')
     sock.sendall(header + data)
-
 
 def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]:
     frames = []
@@ -129,7 +122,7 @@ def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]
     except Exception:
         return None
     if not chunk:
-        return None  # peer closed
+        return None
     buffer.extend(chunk)
     while True:
         if len(buffer) < 4:
@@ -143,7 +136,6 @@ def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]
         del buffer[:4+length]
         frames.append(frame)
     return frames
-
 
 def start_tor_hidden_service(local_port: int):
     global _last_tmp_dir, _last_tor_proc
@@ -191,10 +183,19 @@ ClientOnly 1
     print("[!] HS creation timeout\n")
     return None, None, None
 
-
 def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) -> bytes:
     return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
 
+def make_log_box(log_text: str) -> str:
+    lines = log_text.splitlines()
+    width = max(len(line) for line in lines) if lines else 0
+    top = "┌" + "─" * (width + 2) + "┐"
+    bottom = "└" + "─" * (width + 2) + "┘"
+    boxed_lines = [top]
+    for line in lines:
+        boxed_lines.append("│ " + line.ljust(width) + " │")
+    boxed_lines.append(bottom)
+    return "\n".join(boxed_lines)
 
 def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: SecureNonceCounter):
     stop = threading.Event()
@@ -202,8 +203,7 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
     seq_recv = 0
     recv_buffer = bytearray()
     message_queue = queue.Queue()
-    chat_messages = []
-    user_scrolled_up = False  # Track if user manually scrolled up
+    user_scrolled_up = False
 
     style = Style.from_dict({
         'peer': 'ansicyan',
@@ -213,47 +213,73 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         'error': 'ansired bold',
     })
 
+    # Create writable chat buffer (NOT read-only)
+    chat_buffer = Buffer()
+    
+    # Create input area
+    input_text_area = TextArea(
+        height=1,
+        prompt='You: ',
+        multiline=False,
+        wrap_lines=False,
+    )
+
+    # Create chat window with buffer control
+    chat_window = Window(
+        content=BufferControl(buffer=chat_buffer),
+        wrap_lines=True,
+        right_margins=[ScrollbarMargin()]
+    )
+
     kb = KeyBindings()
 
+    # Global keybindings (work regardless of focus)
     @kb.add('c-c')
     @kb.add('c-q')
     def _(event):
         stop.set()
         event.app.exit()
 
+    # Scroll keybindings - apply globally but affect chat window
     @kb.add('up')
     def _(event):
         nonlocal user_scrolled_up
-        if chat_window.vertical_scroll > 0:
-            chat_window.vertical_scroll -= 1
-            user_scrolled_up = True
+        if has_focus(input_text_area)():  # Only when input is focused
+            if chat_window.vertical_scroll > 0:
+                chat_window.vertical_scroll -= 1
+                user_scrolled_up = True
 
     @kb.add('down')
     def _(event):
         nonlocal user_scrolled_up
-        if not chat_window.render_info:
-            return
-        max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
-        if chat_window.vertical_scroll < max_scroll:
-            chat_window.vertical_scroll += 1
-            if chat_window.vertical_scroll == max_scroll:
-                user_scrolled_up = False
+        if has_focus(input_text_area)():  # Only when input is focused
+            if chat_window.render_info:
+                total_lines = len(chat_buffer.document.lines)
+                window_height = chat_window.render_info.window_height
+                max_scroll = max(0, total_lines - window_height)
+                if chat_window.vertical_scroll < max_scroll:
+                    chat_window.vertical_scroll += 1
+                    if chat_window.vertical_scroll >= max_scroll:
+                        user_scrolled_up = False
 
     @kb.add('pageup')
     def _(event):
         nonlocal user_scrolled_up
-        chat_window.vertical_scroll = max(0, chat_window.vertical_scroll - 10)
-        user_scrolled_up = True
+        if has_focus(input_text_area)():
+            chat_window.vertical_scroll = max(0, chat_window.vertical_scroll - 10)
+            user_scrolled_up = True
 
     @kb.add('pagedown')
     def _(event):
         nonlocal user_scrolled_up
-        if not chat_window.render_info:
-            return
-        max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
-        chat_window.vertical_scroll = min(max_scroll, chat_window.vertical_scroll + 10)
-        if chat_window.vertical_scroll == max_scroll:
-            user_scrolled_up = False
+        if has_focus(input_text_area)():
+            if chat_window.render_info:
+                total_lines = len(chat_buffer.document.lines)
+                window_height = chat_window.render_info.window_height
+                max_scroll = max(0, total_lines - window_height)
+                chat_window.vertical_scroll = min(max_scroll, chat_window.vertical_scroll + 10)
+                if chat_window.vertical_scroll >= max_scroll:
+                    user_scrolled_up = False
 
     def recv_loop():
         nonlocal seq_recv
@@ -262,15 +288,15 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             try:
                 frames = recv_frames(sock, recv_buffer)
                 if frames is None:
-                    message_queue.put(('[Peer disconnected]', 'info'))
+                    message_queue.put('[Peer disconnected]')
                     stop.set()
                     return
             except ConnectionResetError:
-                message_queue.put(('[Connection reset by peer]', 'error'))
+                message_queue.put('[Connection reset by peer]')
                 stop.set()
                 return
             except Exception as e:
-                message_queue.put((f'[recv error: {e}]', 'error'))
+                message_queue.put(f'[recv error: {e}]')
                 stop.set()
                 return
 
@@ -279,37 +305,27 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
                 ct = data[12:]
                 msg = decrypt_message(session_key, data, seq_recv)
                 if msg is None:
-                    message_queue.put(('[Decryption error or replay]', 'error'))
+                    message_queue.put('[Decryption error or replay]')
                     stop.set()
                     return
 
-                peer_block = f"Peer: {msg}"
-                message_queue.put((peer_block, 'peerblock'))
+                # Create combined message with log info
+                peer_msg = f"Peer: {msg}"
+                log_text = f"Seq: {seq_recv}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct).decode()}"
+                log_box = make_log_box(log_text)
+                
+                # Single combined message entry
+                combined_msg = f"{peer_msg}\n{log_box}"
+                message_queue.put(combined_msg)
 
                 if msg.strip().lower() == "exit":
-                    message_queue.put(('[Peer exited the chat]', 'info'))
+                    message_queue.put('[Peer exited the chat]')
                     stop.set()
                     return
 
                 seq_recv += 1
 
     threading.Thread(target=recv_loop, daemon=True).start()
-
-    chat_buffer = Buffer()
-    chat_buffer.read_only = True  # Set read_only after creation to allow .text assignment
-
-    chat_window = Window(
-        content=BufferControl(buffer=chat_buffer),
-        wrap_lines=True,
-        right_margins=[ScrollbarMargin()]
-    )
-
-    input_text_area = TextArea(
-        height=1,
-        prompt='You: ',
-        multiline=False,
-        wrap_lines=False,
-    )
 
     def accept_text(buff):
         nonlocal stop, seq_send
@@ -321,14 +337,22 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             get_app().exit()
             return
         if len(user_input) > MAX_MESSAGE_LENGTH:
-            message_queue.put(('[Error] Message too long.', 'error'))
+            message_queue.put('[Error] Message too long.')
             return
 
         ct = encrypt_message(session_key, user_input, nonce_ctr, seq_send)
+        nonce = ct[:12]
+        ct_payload = ct[12:]
         send_frame(sock, ct)
 
-        user_block = f"You: {user_input}"
-        message_queue.put((user_block, 'userblock'))
+        # Create combined user message with log info
+        user_msg = f"You: {user_input}"
+        log_text = f"Seq: {seq_send}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct_payload).decode()}"
+        log_box = make_log_box(log_text)
+        
+        # Single combined message entry
+        combined_msg = f"{user_msg}\n{log_box}"
+        message_queue.put(combined_msg)
 
         seq_send += 1
         buff.text = ''
@@ -345,25 +369,30 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         key_bindings=kb,
         style=style,
         full_screen=True,
-        refresh_interval=0.2
+        refresh_interval=0.2,
+        focus_element=input_text_area  # Ensure input area has focus
     )
 
     def message_consumer():
         nonlocal user_scrolled_up
         while not stop.is_set():
             try:
-                msg, typ = message_queue.get(timeout=0.5)
-                chat_messages.append((msg, typ))
+                new_message = message_queue.get(timeout=0.5)
+                
+                # Update chat buffer with new message
+                current_text = chat_buffer.text
+                if current_text:
+                    chat_buffer.text = current_text + "\n" + new_message
+                else:
+                    chat_buffer.text = new_message
 
-                # Update chat_buffer content from chat_messages
-                chat_text = ""
-                for m, t in chat_messages:
-                    chat_text += m + "\n"
-                chat_buffer.text = chat_text
-
+                # Auto-scroll logic
                 if chat_window.render_info:
-                    max_scroll = max(0, len(chat_buffer.document.lines) - chat_window.render_info.window_height)
-                    # Auto-scroll only if user is not scrolled up or already at bottom
+                    total_lines = len(chat_buffer.document.lines)
+                    window_height = chat_window.render_info.window_height
+                    max_scroll = max(0, total_lines - window_height)
+                    
+                    # Auto-scroll only if user hasn't scrolled up or is at bottom
                     if not user_scrolled_up or chat_window.vertical_scroll >= max_scroll:
                         chat_window.vertical_scroll = max_scroll
 
@@ -385,7 +414,6 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     print("[Info] Chat session ended.")
 
-
 def _prebind_local_listener() -> Optional[Tuple[socket.socket, int]]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -406,7 +434,6 @@ def _prebind_local_listener() -> Optional[Tuple[socket.socket, int]]:
         return None
     listener.listen(1)
     return listener, port
-
 
 def run_host():
     print("\n=== Host Mode (Convoisum-v2) ===\n")
@@ -514,7 +541,6 @@ def run_host():
             pass
 
     handle_chat(conn, session_key, nonce_ctr)
-
 
 def run_client():
     print("\n=== Client Mode (Convoisum-v2) ===\n")
@@ -631,7 +657,6 @@ def run_client():
         return
     if not stop:
         handle_chat(s, session_key, nonce_ctr)
-
 
 def main_menu():
     while True:
