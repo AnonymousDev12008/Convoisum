@@ -190,19 +190,18 @@ def handle_chat(sock, session_key, nonce_ctr):
         'error':'ansired bold'
     })
 
-    # Chat display area
     chat_area = TextArea(
         text="",
         read_only=True,
         focusable=False,
+        scrollbar=True,
         wrap_lines=True
     )
-    # Input area
     input_area = TextArea(
         height=1,
-        prompt="You: ",
+        prompt='You: ',
         multiline=False,
-        wrap_lines=False
+        wrap_lines=False,
     )
 
     kb = KeyBindings()
@@ -259,7 +258,7 @@ def handle_chat(sock, session_key, nonce_ctr):
                     f"Seq: {seq_recv}\nNonce: {nonce.hex()}\nPayload: {base64.b64encode(ct).decode()}"
                 )
                 queue_msgs.put(f"{peer}\n{log}")
-                if msg.lower()=="exit":
+                if msg.lower() == "exit":
                     queue_msgs.put("[Peer exited]")
                     stop.set()
                     return
@@ -270,13 +269,14 @@ def handle_chat(sock, session_key, nonce_ctr):
     def accept(buf):
         nonlocal seq_send
         txt = buf.text.strip()
-        if not txt: return
-        if txt.lower()=="exit":
+        if not txt:
+            return
+        if txt.lower() == "exit":
             stop.set()
             get_app().exit()
             return
-        if len(txt)>MAX_MESSAGE_LENGTH:
-            queue_msgs.put("[Error] Too long")
+        if len(txt) > MAX_MESSAGE_LENGTH:
+            queue_msgs.put("[Error] Message too long.")
             return
         ct = encrypt_message(session_key, txt, nonce_ctr, seq_send)
         send_frame(sock, ct)
@@ -293,7 +293,11 @@ def handle_chat(sock, session_key, nonce_ctr):
 
     input_area.buffer.accept_handler = accept
 
-    root = HSplit([chat_area, input_area])
+    root = HSplit([
+        chat_area,
+        input_area,
+    ])
+
     app = Application(
         layout=Layout(root),
         key_bindings=kb,
@@ -301,6 +305,7 @@ def handle_chat(sock, session_key, nonce_ctr):
         full_screen=True,
         refresh_interval=0.2
     )
+
     app.layout.focus(input_area)
 
     def consumer():
@@ -308,7 +313,7 @@ def handle_chat(sock, session_key, nonce_ctr):
         while not stop.is_set():
             try:
                 m = queue_msgs.get(timeout=0.5)
-                at_bottom = chat_area.buffer.cursor_position >= len(chat_area.text)-1
+                at_bottom = chat_area.buffer.cursor_position >= len(chat_area.text) - 1
                 chat_area.text = (chat_area.text + "\n" + m) if chat_area.text else m
                 if at_bottom and not user_scrolled_up:
                     chat_area.buffer.cursor_position = len(chat_area.text)
@@ -317,90 +322,183 @@ def handle_chat(sock, session_key, nonce_ctr):
                 pass
 
     threading.Thread(target=consumer, daemon=True).start()
-
     try:
         app.run()
-    except Exception as e:
-        print(f"[Error] {e}")
     finally:
-        try: sock.close()
-        except: pass
-
-def _prebind_listener() -> Optional[tuple]:
-    s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-    for _ in range(30):
-        p=random.randint(15000,20000)
         try:
-            s.bind(("127.0.0.1",p)); s.listen(1)
-            return s,p
+            sock.close()
+        except:
+            pass
+
+def _prebind_listener() -> Optional[Tuple[socket.socket, int]]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    for _ in range(30):
+        p = random.randint(15000, 20000)
+        try:
+            s.bind(("127.0.0.1", p))
+            s.listen(1)
+            return s, p
         except OSError:
             continue
     return None
 
 def run_host():
-    print("=== Host ===")
-    res=_prebind_listener()
-    if not res: return
-    lstn,port=res
-    print("Starting Tor...");proc,onion,tmp=start_tor_hidden_service(port)
-    if not proc: return
-    print(f"Onion: {onion}, Port: {port}")
-    priv,pub=generate_keys();nonce_ctr=SecureNonceCounter()
-    pem=serialize_public_key(pub).decode()
+    print("\n=== Host Mode (Convoisum-v2) ===\n")
+    res = _prebind_listener()
+    if not res:
+        print("[Error] Could not find an available local port\n")
+        return
+    lstn, port = res
+    print("[Info] Starting Tor HS... please wait\n")
+    proc, onion, tmp = start_tor_hidden_service(port)
+    if not proc or not onion:
+        try:
+            lstn.close()
+        except:
+            pass
+        return
+    print(f"[Success] HS ready\nOnion: {onion}\nPort: {port}\n")
+
+    priv, pub = generate_keys()
+    nonce_ctr = SecureNonceCounter()
+    pem = serialize_public_key(pub).decode()
     print(pem)
-    peer=read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
-    if not peer: return
-    peer_pub=deserialize_public_key(peer)
-    sess=derive_shared_key_with_context(priv,peer_pub,
-        build_transcript(pub.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo),
-                         peer_pub.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo),
-                         onion,port)
+    peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
+    if not peer_pem:
+        try:
+            lstn.close()
+        except:
+            pass
+        return
+
+    peer_pub = deserialize_public_key(peer_pem)
+    transcript = build_transcript(
+        pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        peer_pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        onion,
+        port,
     )
-    sas=derive_sas(sess,sess);print(f"SAS: {sas}")
-    if input("Proceed? (yes/no): ").strip().lower()!="yes": return
-    conn,_=lstn.accept();lstn.close()
-    handle_chat(conn,sess,nonce_ctr)
+    session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
+    sas = derive_sas(session_key, transcript)
+    print(f"[Info] SAS: {sas}")
+
+    if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
+        try:
+            lstn.close()
+        except:
+            pass
+        print("[Info] Aborted\n")
+        return
+    stop_flag = threading.Event()
+
+    def cancel_monitor():
+        while not stop_flag.is_set():
+            try:
+                cmd = sys.stdin.readline()
+            except EOFError:
+                break
+            if cmd.strip().lower() == "cancel":
+                stop_flag.set()
+                try:
+                    lstn.close()
+                except Exception:
+                    pass
+                print("[Info] Host cancelled\n")
+                break
+
+    threading.Thread(target=cancel_monitor, daemon=True).start()
+    try:
+        conn, _ = lstn.accept()
+        print("[Info] Peer connected. Starting chat session.\n")
+    except Exception:
+        if stop_flag.is_set():
+            return
+        print("[Error] Listener error\n")
+        return
+    finally:
+        stop_flag.set()
+        try:
+            lstn.close()
+        except:
+            pass
+    handle_chat(conn, session_key, nonce_ctr)
 
 def run_client():
-    print("=== Client ===")
-    onion=input("Host Onion: ").strip()
-    port_s=input("Host port: ").strip()
-    port=validate_port(port_s)
-    if not port: return
-    if not is_listening("127.0.0.1",9050):
-        subprocess.Popen(["tor"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        for _ in range(20):
-            if is_listening("127.0.0.1",9050): break
-            time.sleep(1)
-    priv,pub=generate_keys();nonce_ctr=SecureNonceCounter()
-    pem=serialize_public_key(pub).decode();print(pem)
-    peer=read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
-    if not peer: return
-    peer_pub=deserialize_public_key(peer)
-    transcript=build_transcript(
-        peer_pub.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo),
-        pub.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo),
-        onion,port
+    print("\n=== Client Mode (Convoisum-v2) ===\n")
+    onion = input("[Prompt] Host Onion (.onion): ").strip()
+    if onion.lower() == "cancel":
+        print("[Info] Cancelled\n")
+        return
+    if not strict_onion_v3_check(onion):
+        print("[Error] Invalid onion\n")
+        return
+    port_s = input("[Prompt] Host port: ").strip()
+    if port_s.lower() == "cancel":
+        print("[Info] Cancelled\n")
+        return
+    port = validate_port(port_s)
+    if not port:
+        print("[Error] Invalid port\n")
+        return
+    if not is_listening("127.0.0.1", 9050):
+        print("[Info] Starting Tor... please wait")
+        try:
+            subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(20):
+                if is_listening("127.0.0.1", 9050):
+                    break
+                time.sleep(1)
+            else:
+                print("[Warning] Timeout waiting for Tor proxy\n")
+        except FileNotFoundError:
+            print("[!] Tor not found; start manually\n")
+            return
+
+    priv, pub = generate_keys()
+    nonce_ctr = SecureNonceCounter()
+    pem = serialize_public_key(pub).decode()
+    print(pem)
+    peer_pem = read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
+    if not peer_pem:
+        return
+
+    peer_pub = deserialize_public_key(peer_pem)
+    transcript = build_transcript(
+        peer_pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
+        onion,
+        port,
     )
-    sess=derive_shared_key_with_context(priv,peer_pub,transcript)
-    sas=derive_sas(sess,transcript);print(f"SAS: {sas}")
-    if input("Proceed? (yes/no): ").strip().lower()!="yes": return
-    s=socks.socksocket();s.set_proxy(socks.SOCKS5,"127.0.0.1",9050)
-    s.connect((onion,port))
-    handle_chat(s,sess,nonce_ctr)
+    session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
+    sas = derive_sas(session_key, transcript)
+    print(f"[Info] SAS: {sas}")
+    if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
+        print("[Info] Aborted\n")
+        return
+
+    s = socks.socksocket()
+    s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+    s.connect((onion, port))
+    handle_chat(s, session_key, nonce_ctr)
 
 def main_menu():
+    print("Welcome to Convoisum-v2\n")
+    print("Choose an option:")
+    print("[h] Host a chat session")
+    print("[j] Join a chat session")
+    print("[q] Quit\n")
     while True:
-        print(""" === Convoisum V2 ===
-              
-              [h] Host  [j] Join  [q] Quit
-              
-              """)
-        c=input("Choice: ").strip().lower()
-        if c=="h": run_host()
-        elif c=="j": run_client()
-        elif c=="q": break
+        choice = input("Enter your choice (h/j/q): ").strip().lower()
+        if choice == 'h':
+            run_host()
+        elif choice == 'j':
+            run_client()
+        elif choice == 'q':
+            print("Bye!")
+            break
+        else:
+            print("Invalid input. Please enter 'h', 'j', or 'q'.")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main_menu()
