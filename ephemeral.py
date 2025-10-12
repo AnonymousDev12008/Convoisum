@@ -258,7 +258,7 @@ def handle_chat(sock, session_key, nonce_ctr):
                     f"Seq: {seq_recv}\nNonce: {nonce.hex()}\nPayload: {base64.b64encode(ct).decode()}"
                 )
                 queue_msgs.put(f"{peer}\n{log}")
-                if msg.lower() == "exit":
+                if msg.strip().lower() == "exit":
                     queue_msgs.put("[Peer exited]")
                     stop.set()
                     return
@@ -272,6 +272,8 @@ def handle_chat(sock, session_key, nonce_ctr):
         if not txt:
             return
         if txt.lower() == "exit":
+            ct = encrypt_message(session_key, "exit", nonce_ctr, seq_send)
+            send_frame(sock, ct)
             stop.set()
             get_app().exit()
             return
@@ -358,18 +360,18 @@ def run_host():
         except:
             pass
         return
-    
+
     print("This is your onion address and port. Please share it with your peer over a secure channel.\n")
     print(f"Onion address: {onion}")
     print(f"Port: {port}\n")
-    
+
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
-    
+
     print("This is your public key PEM. Please share it securely with your peer (e.g., video call).\n")
     pem = serialize_public_key(pub).decode()
     print(pem)
-    
+
     peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
     if not peer_pem:
         try:
@@ -377,7 +379,7 @@ def run_host():
         except:
             pass
         return
-    
+
     peer_pub = deserialize_public_key(peer_pem)
     transcript = build_transcript(
         pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
@@ -387,7 +389,7 @@ def run_host():
     )
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    
+
     print("Verify the following SAS code over a secure video channel for highest security:\n")
     print(f"SAS: {sas}\n")
 
@@ -452,6 +454,11 @@ def run_client():
     if not port:
         print("[Error] Invalid port\n")
         return
+
+    print("This is the host onion address and port you are connecting to. Ensure you obtained this over a secure channel.\n")
+    print(f"Onion address: {onion}")
+    print(f"Port: {port}\n")
+
     if not is_listening("127.0.0.1", 9050):
         print("[Info] Starting Tor... please wait")
         try:
@@ -468,8 +475,11 @@ def run_client():
 
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
+
+    print("This is your public key PEM. Share it securely with your peer (e.g., via a secure video call).\n")
     pem = serialize_public_key(pub).decode()
     print(pem)
+
     peer_pem = read_pem_from_stdin("Paste host PUBLIC KEY PEM:")
     if not peer_pem:
         return
@@ -483,7 +493,10 @@ def run_client():
     )
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"[Info] SAS: {sas}")
+
+    print("Verify the following SAS code over a secure video channel for the highest security:\n")
+    print(f"SAS: {sas}\n")
+
     if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
         print("[Info] Aborted\n")
         return
