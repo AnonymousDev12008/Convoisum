@@ -77,23 +77,30 @@ def validate_port(s: str) -> Optional[int]:
 
 def read_pem_from_stdin(prompt: str) -> Optional[bytes]:
     while True:
-        print(f"\n{prompt} (enter full PEM block including headers or type 'cancel' to abort)")
+        print(f"
+{prompt} (enter full PEM block including headers or type 'cancel' to abort)")
         lines = []
         while True:
             line = sys.stdin.readline()
             if not line:
-                print("[!] Incomplete PEM; returning to menu.")
+                print("[!] Incomplete PEM; returning to menu.
+")
                 return None
-            line = line.rstrip("\n")
+            line = line.rstrip("
+")
             if line.lower() == "cancel":
-                print("[Info] Input cancelled. Returning to main menu.\n")
+                print("[Info] Input cancelled. Returning to main menu.
+")
                 return None
             lines.append(line)
             if line == "-----END PUBLIC KEY-----":
                 break
-        pem = "\n".join(lines) + "\n"
+        pem = "
+".join(lines) + "
+"
         if not pem.startswith("-----BEGIN PUBLIC KEY-----"):
-            print("[Error] Invalid PEM format. Please try again or type 'cancel' to abort.\n")
+            print("[Error] Invalid PEM format. Please try again or type 'cancel' to abort.
+")
             continue
         return pem.encode()
 
@@ -163,7 +170,8 @@ ClientOnly 1
             start_new_session=not platform.system().lower().startswith("win")
         )
     except FileNotFoundError:
-        print("[!] Tor not found.")
+        print("[!] Tor not found.
+")
         shutil.rmtree(tmp, ignore_errors=True)
         return None, None, None
 
@@ -186,7 +194,8 @@ ClientOnly 1
     except Exception:
         pass
     shutil.rmtree(tmp, ignore_errors=True)
-    print("[!] HS creation timeout")
+    print("[!] HS creation timeout
+")
     return None, None, None
 
 
@@ -221,15 +230,21 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             try:
                 frames = recv_frames(sock, recv_buffer)
                 if frames is None:
-                    print("\n[!] Peer disconnected")
+                    print("
+[!] Peer disconnected
+")  # Extra newline for spacing
                     stop.set()
                     return
             except ConnectionResetError:
-                print("\n[!] Connection reset by peer")
+                print("
+[!] Connection reset by peer
+")  # Extra newline
                 stop.set()
                 return
             except Exception as e:
-                print(f"\n[!] recv error: {e}")
+                print(f"
+[!] recv error: {e}
+")  # Extra newline
                 stop.set()
                 return
 
@@ -237,17 +252,24 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
                 # Log received encrypted data info
                 nonce = data[:12]
                 ct = data[12:]
-                print(f"[Recv] Seq: {seq_recv}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct).decode()}")
+                print(f"
+[Recv] Seq: {seq_recv}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct).decode()}
+")  # Surround with newlines
 
                 # Decrypt with expected sequence number
                 msg = decrypt_message(session_key, data, seq_recv)
                 if msg is None:
-                    print("\n[!] Decryption failed or out-of-order/replay detected")
+                    print("
+[!] Decryption failed or out-of-order/replay detected
+")
                     stop.set()
                     return
-                print(f"\nPeer (Seq {seq_recv}): {msg}\n")
-                print("You: ", end="", flush=True)
+                print(f"
+Peer (Seq {seq_recv}): {msg}
+")  # Extra newline
                 if msg.strip().lower() == "exit":
+                    print("[Info] Peer exited the chat.
+")
                     stop.set()
                     return
                 seq_recv += 1
@@ -256,19 +278,24 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     while not stop.is_set():
         try:
-            msg = input("You: ")
+            msg = input("
+You: ")  # Extra newline
         except (EOFError, KeyboardInterrupt):
-            print("\n[Info] Exiting chat.")
+            print("
+[Info] Exiting chat.
+")
             stop.set()
             break
 
         if msg.strip().lower() == "cancel":
-            print("[Info] Chat cancelled.")
+            print("[Info] Chat cancelled.
+")
             stop.set()
             break
 
         if len(msg) > MAX_MESSAGE_LENGTH:
-            print(f"[Error] Message too long (max {MAX_MESSAGE_LENGTH} chars). Please shorten.")
+            print(f"[Error] Message too long (max {MAX_MESSAGE_LENGTH} chars). Please shorten.
+")
             continue
 
         ct = encrypt_message(session_key, msg, nonce_ctr, seq_send)
@@ -276,13 +303,18 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         # Log sent encrypted data info
         nonce = ct[:12]
         ct_payload = ct[12:]
-        print(f"[Sent] Seq: {seq_send}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct_payload).decode()}")
+        print(f"
+[Sent] Seq: {seq_send}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct_payload).decode()}
+")  # Extra newline after each send
 
         send_frame(sock, ct)
 
         if msg.strip().lower() == "exit":
-            print("\n[Info] You exited the chat.")
+            print("
+[Info] You exited the chat.
+")
             stop.set()
+            break  # Explicit break ensures the main loop ends here
 
         seq_send += 1
 
@@ -290,7 +322,9 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         sock.close()
     except Exception:
         pass
-    print("\n[Info] Chat session ended.\n")
+    print("
+[Info] Chat session ended.
+")
 
 
 # -------- Host/client flows --------
@@ -318,15 +352,18 @@ def _prebind_local_listener() -> Tuple[Optional[socket.socket], Optional[int]]:
 
 
 def run_host():
-    print("\n=== Host Mode (Convoisim-v2) ===")
+    print("
+=== Host Mode (Convoisim-v2) ===")
 
     # Pre-bind port before creating HS to avoid conflicts
     listener, port = _prebind_local_listener()
     if listener is None:
-        print("[Error] Could not find an available local port")
+        print("[Error] Could not find an available local port
+")
         return
 
-    print("[Info] Starting Tor HS... please wait")
+    print("[Info] Starting Tor HS... please wait
+")
     proc, onion, tmp = start_tor_hidden_service(port)
     if not proc or not onion:
         try:
@@ -334,11 +371,14 @@ def run_host():
         except Exception:
             pass
         return
-    print("[Success] HS ready\n")
+    print("[Success] HS ready
+")
 
-    print("[Warning] THIS IS YOUR PUBLIC KEY PEM. SHARE IT SECURELY ONLY (e.g., video call).")
+    print("[Warning] THIS IS YOUR PUBLIC KEY PEM. SHARE IT SECURELY ONLY (e.g., video call).
+")
     print(f"Onion address: {onion}")
-    print(f"Port: {port}")
+    print(f"Port: {port}
+")
 
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
@@ -347,11 +387,17 @@ def run_host():
     if USE_CLIPBOARD and pyperclip:
         try:
             pyperclip.copy(pem)
-            print("\n[Info] PEM copied to clipboard\n")
+            print("
+[Info] PEM copied to clipboard
+")
         except Exception:
-            print("\n[Warning] Failed to copy PEM to clipboard, please copy manually\n")
+            print("
+[Warning] Failed to copy PEM to clipboard, please copy manually
+")
     else:
-        print("\n[Info] Clipboard copy disabled or unavailable\n")
+        print("
+[Info] Clipboard copy disabled or unavailable
+")
 
     print(pem)
 
@@ -365,9 +411,11 @@ def run_host():
 
     try:
         peer_pub = deserialize_public_key(peer_pem)
-        print("[Success] Public key verified\n")
+        print("[Success] Public key verified
+")
     except ValueError as e:
-        print(f"[Error] {e}\n")
+        print(f"[Error] {e}
+")
         try:
             listener.close()
         except Exception:
@@ -384,14 +432,16 @@ def run_host():
     sas = derive_sas(session_key, transcript)
     print(f"SAS: {sas}")
     if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
-        print("[Info] Aborted\n")
+        print("[Info] Aborted
+")
         try:
             listener.close()
         except Exception:
             pass
         return
 
-    print("[Info] Waiting for peer (type 'cancel' to abort):")
+    print("[Info] Waiting for peer (type 'cancel' to abort):
+")
     stop_flag = threading.Event()
 
     def cancel_monitor():
@@ -406,17 +456,20 @@ def run_host():
                     listener.close()
                 except Exception:
                     pass
-                print("[Info] Host cancelled\n")
+                print("[Info] Host cancelled
+")
                 break
 
     threading.Thread(target=cancel_monitor, daemon=True).start()
     try:
         conn, _ = listener.accept()
-        print("[Info] Peer connected. Starting chat session.\n")
+        print("[Info] Peer connected. Starting chat session.
+")
     except Exception:
         if stop_flag.is_set():
             return
-        print("[Error] Listener error\n")
+        print("[Error] Listener error
+")
         return
     finally:
         stop_flag.set()
@@ -429,22 +482,27 @@ def run_host():
 
 
 def run_client():
-    print("\n=== Client Mode (Convoisim-v2) ===")
+    print("
+=== Client Mode (Convoisim-v2) ===")
     onion = input("[Prompt] Host Onion (.onion): ").strip()
     if onion.lower() == "cancel":
-        print("[Info] Cancelled\n")
+        print("[Info] Cancelled
+")
         return
     if not strict_onion_v3_check(onion):
-        print("[Error] Invalid onion\n")
+        print("[Error] Invalid onion
+")
         return
 
     port_s = input("[Prompt] Host port: ").strip()
     if port_s.lower() == "cancel":
-        print("[Info] Cancelled\n")
+        print("[Info] Cancelled
+")
         return
     port = validate_port(port_s)
     if not port:
-        print("[Error] Invalid port\n")
+        print("[Error] Invalid port
+")
         return
 
     if not is_listening("127.0.0.1", 9050):
@@ -456,9 +514,11 @@ def run_client():
                     break
                 time.sleep(1)
             else:
-                print("[Warning] Timeout waiting for Tor proxy\n")
+                print("[Warning] Timeout waiting for Tor proxy
+")
         except FileNotFoundError:
-            print("[!] Tor not found; start manually\n")
+            print("[!] Tor not found; start manually
+")
             return
 
     priv, pub = generate_keys()
@@ -468,11 +528,17 @@ def run_client():
     if USE_CLIPBOARD and pyperclip:
         try:
             pyperclip.copy(pem)
-            print("\n[Info] PEM copied to clipboard\n")
+            print("
+[Info] PEM copied to clipboard
+")
         except Exception:
-            print("\n[Warning] Copy failed, copy manually\n")
+            print("
+[Warning] Copy failed, copy manually
+")
     else:
-        print("\n[Info] Clipboard copy disabled or unavailable\n")
+        print("
+[Info] Clipboard copy disabled or unavailable
+")
 
     print(pem)
 
@@ -482,9 +548,11 @@ def run_client():
 
     try:
         peer_pub = deserialize_public_key(peer_pem)
-        print("[Success] Public key verified\n")
+        print("[Success] Public key verified
+")
     except ValueError as e:
-        print(f"[Error] {e}\n")
+        print(f"[Error] {e}
+")
         return
 
     transcript = build_transcript(
@@ -497,21 +565,24 @@ def run_client():
     sas = derive_sas(session_key, transcript)
     print(f"SAS: {sas}")
     if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
-        print("[Info] Aborted\n")
+        print("[Info] Aborted
+")
         return
 
     s = socks.socksocket()
     s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
     s.settimeout(10.0)
     s.setblocking(True)
-    print("[Info] Connecting to peer... (type 'cancel' to abort)")
+    print("[Info] Connecting to peer... (type 'cancel' to abort)
+")
     connect_err = None
     stop = False
 
     while True:
         try:
             s.connect((onion, port))
-            print("[Info] Connected! Start typing messages. Type 'exit' to quit.\n")
+            print("[Info] Connected! Start typing messages. Type 'exit' to quit.
+")
             break
         except BlockingIOError:
             pass
@@ -530,14 +601,16 @@ def run_client():
             cmd = sys.stdin.readline().strip().lower()
             if cmd == "cancel":
                 stop = True
-                print("[Info] Connection cancelled\n")
+                print("[Info] Connection cancelled
+")
                 break
         if stop:
             break
         time.sleep(0.2)
 
     if connect_err:
-        print(f"[Error] Connection failed: {connect_err}\n")
+        print(f"[Error] Connection failed: {connect_err}
+")
         try:
             s.close()
         except Exception:
@@ -559,15 +632,18 @@ Hide | Chat | Erase | Repeat
 [h] Host  [j] Join  [q] Quit
 """)
         choice = input("Choice: ").strip().lower()
+        print()  # Add a blank line after menu choice prompt
         if choice == "h":
             run_host()
         elif choice == "j":
             run_client()
         elif choice == "q":
-            print("[Info] Goodbye!\n")
+            print("[Info] Goodbye!
+")
             break
         else:
-            print("[Error] Enter 'h', 'j', or 'q'\n")
+            print("[Error] Enter 'h', 'j', or 'q'
+")
 
 
 if __name__ == "__main__":
