@@ -14,6 +14,8 @@ import re
 import select
 import base64
 from typing import Optional, Tuple, List
+import queue
+import prompt_toolkit
 
 import socks  # PySocks
 try:
@@ -34,6 +36,9 @@ from crypto_core import (
     SecureNonceCounter,
     SecureBytes,
 )
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 
 DEBUG = False
 USE_CLIPBOARD = False  # Default off for safety
@@ -104,7 +109,6 @@ def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     except Exception:
         return False
 
-
 # -------- Framing (length-prefixed messages) --------
 
 def send_frame(sock: socket.socket, data: bytes) -> None:
@@ -137,11 +141,6 @@ def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]
 # -------- Tor helpers (hardened) --------
 
 def start_tor_hidden_service(local_port: int):
-    """
-    Hardened torrc:
-    - No SocksPort (avoids conflicts with existing Tor)
-    - ClientOnly 1
-    """
     global _last_tmp_dir, _last_tor_proc
     tmp = tempfile.mkdtemp(prefix="convoisim_v2_")
     os.chmod(tmp, 0o700)
@@ -193,26 +192,28 @@ ClientOnly 1
 # -------- Transcript binding --------
 
 def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) -> bytes:
-    """
-    Directional transcript: host DER || client DER || onion || port(2B big-endian)
-    """
     return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
 
 
-# -------- Chat logic (strict sequencing + framing + logging) --------
+# -------- Chat logic (prompt_toolkit based) --------
 
 def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: SecureNonceCounter):
-    """
-    Strict in-order, framed chat:
-    - Frames are length-prefixed.
-    - Sequence numbers are per-direction, strictly monotonic (0,1,2,...).
-    - Associated data in AEAD binds the sequence.
-    - Logs encrypted frames info for demo/testing.
-    """
     stop = threading.Event()
     seq_send = 0
     seq_recv = 0
     recv_buffer = bytearray()
+    message_queue = queue.Queue()
+
+    def make_log_box(log_text: str) -> str:
+        lines = log_text.splitlines()
+        width = max(len(line) for line in lines)
+        top = "┌" + "─" * (width + 2) + "┐"
+        bottom = "└" + "─" * (width + 2) + "┘"
+        boxed_lines = [top]
+        for line in lines:
+            boxed_lines.append("│ " + line.ljust(width) + " │")
+        boxed_lines.append(bottom)
+        return "\n".join(boxed_lines)
 
     def recv_loop():
         nonlocal seq_recv
@@ -221,77 +222,88 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             try:
                 frames = recv_frames(sock, recv_buffer)
                 if frames is None:
-                    print("\n[!] Peer disconnected\n")
+                    message_queue.put(('[Peer disconnected]', 'info'))
                     stop.set()
                     return
             except ConnectionResetError:
-                print("\n[!] Connection reset by peer\n")
+                message_queue.put(('[Connection reset by peer]', 'error'))
                 stop.set()
                 return
             except Exception as e:
-                print(f"\n[!] recv error: {e}\n")
+                message_queue.put((f'[recv error: {e}]', 'error'))
                 stop.set()
                 return
 
             for data in frames:
-                # Log received encrypted data info
                 nonce = data[:12]
                 ct = data[12:]
-                print(f"\n[Recv] Seq: {seq_recv}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct).decode()}\n")
-
-                # Decrypt with expected sequence number
                 msg = decrypt_message(session_key, data, seq_recv)
                 if msg is None:
-                    print("\n[!] Decryption failed or out-of-order/replay detected\n")
+                    message_queue.put(('[Decryption error or replay]', 'error'))
                     stop.set()
                     return
-                print(f"\nPeer (Seq {seq_recv}): {msg}\n")
+
+                peer_block = f"\033[1;36mPeer: {msg}\033[0m"
+                log_text = f"Seq: {seq_recv}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct).decode()}"
+                log_box = make_log_box(log_text)
+                colored_log_box = "\033[90m" + log_box + "\033[0m"
+
+                message_queue.put((peer_block, 'peerblock'))
+                message_queue.put((colored_log_box, 'logblock'))
+
                 if msg.strip().lower() == "exit":
-                    print("[Info] Peer exited the chat.\n")
+                    message_queue.put(('[Peer exited the chat]', 'info'))
                     stop.set()
                     return
+
                 seq_recv += 1
 
     threading.Thread(target=recv_loop, daemon=True).start()
+    session = PromptSession()
+    print("Type 'exit' or Ctrl-C to quit.\n")
 
-    while not stop.is_set():
-        try:
-            msg = input("\nYou: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n[Info] Exiting chat.\n")
-            stop.set()
-            break
+    with patch_stdout():
+        while not stop.is_set():
+            # print all queued messages
+            while not message_queue.empty():
+                msg, typ = message_queue.get()
+                print(msg)
 
-        if msg.strip().lower() == "cancel":
-            print("[Info] Chat cancelled.\n")
-            stop.set()
-            break
+            try:
+                user_msg = session.prompt("You: ")
+            except (KeyboardInterrupt, EOFError):
+                print("\n[Info] Chat exited.")
+                stop.set()
+                break
 
-        if len(msg) > MAX_MESSAGE_LENGTH:
-            print(f"[Error] Message too long (max {MAX_MESSAGE_LENGTH} chars). Please shorten.\n")
-            continue
+            if user_msg.strip().lower() == "exit":
+                print("[Info] You exited the chat.")
+                stop.set()
+                break
 
-        ct = encrypt_message(session_key, msg, nonce_ctr, seq_send)
+            if len(user_msg) > MAX_MESSAGE_LENGTH:
+                print(f"[Error] Message too long (max {MAX_MESSAGE_LENGTH} chars).")
+                continue
 
-        # Log sent encrypted data info
-        nonce = ct[:12]
-        ct_payload = ct[12:]
-        print(f"\n[Sent] Seq: {seq_send}, Nonce: {nonce.hex()}, Payload (b64): {base64.b64encode(ct_payload).decode()}\n")
+            ct = encrypt_message(session_key, user_msg, nonce_ctr, seq_send)
+            nonce = ct[:12]
+            ct_payload = ct[12:]
+            user_block = f"You: {user_msg}"
+            log_text = f"Seq: {seq_send}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct_payload).decode()}"
+            log_box = make_log_box(log_text)
+            colored_log_box = "\033[93m" + log_box + "\033[0m"
 
-        send_frame(sock, ct)
+            message_queue.put((user_block, 'userblock'))
+            message_queue.put((colored_log_box, 'logblock'))
 
-        if msg.strip().lower() == "exit":
-            print("\n[Info] You exited the chat.\n")
-            stop.set()
-            break
-
-        seq_send += 1
+            send_frame(sock, ct)
+            seq_send += 1
 
     try:
         sock.close()
     except Exception:
         pass
-    print("\n[Info] Chat session ended.\n")
+    print("[Info] Chat session ended.")
 
 
 # -------- Host/client flows --------
@@ -321,7 +333,6 @@ def _prebind_local_listener() -> Tuple[Optional[socket.socket], Optional[int]]:
 def run_host():
     print("\n=== Host Mode (Convoisim-v2) ===\n")
 
-    # Pre-bind port before creating HS to avoid conflicts
     listener, port = _prebind_local_listener()
     if listener is None:
         print("[Error] Could not find an available local port\n")
@@ -561,7 +572,7 @@ Hide | Chat | Erase | Repeat
 [h] Host  [j] Join  [q] Quit
 """)
         choice = input("Choice: ").strip().lower()
-        print()  # Add a blank line after menu choice prompt
+        print()
         if choice == "h":
             run_host()
         elif choice == "j":
