@@ -82,6 +82,7 @@ Example requirements.txt:
 cryptography==43.0.1
 PySocks==1.7.1
 pyperclip==1.9.0
+prompt_toolkit
 ```
 
 ## Installation
@@ -212,5 +213,6 @@ v2.0.0 2025-08-24
 - Uses Tor v3 hidden services for network anonymity
 
 Contributions and independent reviews are welcome. For high-stakes use, consider a dedicated, hardened environment, pinned dependencies, and external security review.
+
 
 
