@@ -392,7 +392,11 @@ def run_client():
 
 def main_menu():
     while True:
-        print("[h] Host  [j] Join  [q] Quit")
+        print(""" === Convoisum V2 ===
+              
+              [h] Host  [j] Join  [q] Quit
+              
+              """)
         c=input("Choice: ").strip().lower()
         if c=="h": run_host()
         elif c=="j": run_client()
