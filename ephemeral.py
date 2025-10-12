@@ -350,7 +350,7 @@ def run_host():
         print("[Error] Could not find an available local port\n")
         return
     lstn, port = res
-    print("[Info] Starting Tor HS... please wait\n")
+    print("[Info] Starting Tor hidden service... please wait.\n")
     proc, onion, tmp = start_tor_hidden_service(port)
     if not proc or not onion:
         try:
@@ -358,12 +358,18 @@ def run_host():
         except:
             pass
         return
-    print(f"[Success] HS ready\nOnion: {onion}\nPort: {port}\n")
-
+    
+    print("This is your onion address and port. Please share it with your peer over a secure channel.\n")
+    print(f"Onion address: {onion}")
+    print(f"Port: {port}\n")
+    
     priv, pub = generate_keys()
     nonce_ctr = SecureNonceCounter()
+    
+    print("This is your public key PEM. Please share it securely with your peer (e.g., video call).\n")
     pem = serialize_public_key(pub).decode()
     print(pem)
+    
     peer_pem = read_pem_from_stdin("Paste peer PUBLIC KEY PEM:")
     if not peer_pem:
         try:
@@ -371,17 +377,19 @@ def run_host():
         except:
             pass
         return
-
+    
     peer_pub = deserialize_public_key(peer_pem)
     transcript = build_transcript(
         pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
         peer_pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo),
         onion,
-        port,
+        port
     )
     session_key = derive_shared_key_with_context(priv, peer_pub, transcript)
     sas = derive_sas(session_key, transcript)
-    print(f"[Info] SAS: {sas}")
+    
+    print("Verify the following SAS code over a secure video channel for highest security:\n")
+    print(f"SAS: {sas}\n")
 
     if input("[Prompt] Proceed? (yes/no): ").strip().lower() != "yes":
         try:
@@ -390,6 +398,7 @@ def run_host():
             pass
         print("[Info] Aborted\n")
         return
+
     stop_flag = threading.Event()
 
     def cancel_monitor():
@@ -408,6 +417,7 @@ def run_host():
                 break
 
     threading.Thread(target=cancel_monitor, daemon=True).start()
+
     try:
         conn, _ = lstn.accept()
         print("[Info] Peer connected. Starting chat session.\n")
@@ -422,6 +432,7 @@ def run_host():
             lstn.close()
         except:
             pass
+
     handle_chat(conn, session_key, nonce_ctr)
 
 def run_client():
@@ -483,11 +494,11 @@ def run_client():
     handle_chat(s, session_key, nonce_ctr)
 
 def main_menu():
-    print("Welcome to Convoisum-v2\n")
-    print("Choose an option:")
-    print("[h] Host a chat session")
-    print("[j] Join a chat session")
-    print("[q] Quit\n")
+    print("\n===== Welcome to Convoisum-v2 =====\n")
+    print("Instructions: Choose one of the options below:")
+    print("  [h] Host a chat session")
+    print("  [j] Join a chat session")
+    print("  [q] Quit the application\n")
     while True:
         choice = input("Enter your choice (h/j/q): ").strip().lower()
         if choice == 'h':
@@ -495,10 +506,10 @@ def main_menu():
         elif choice == 'j':
             run_client()
         elif choice == 'q':
-            print("Bye!")
+            print("\nThank you for using Convoisum-v2! Goodbye.\n")
             break
         else:
-            print("Invalid input. Please enter 'h', 'j', or 'q'.")
+            print("\nInvalid input. Please enter 'h', 'j', or 'q'.\n")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main_menu()
