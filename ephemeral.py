@@ -38,7 +38,6 @@ from crypto_core import (
 
 from prompt_toolkit import Application
 from prompt_toolkit.application.current import get_app
-from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -53,12 +52,12 @@ MAX_MESSAGE_LENGTH = 512
 _last_tmp_dir = None
 _last_tor_proc = None
 
-# Cleanup and signal handling
 def cleanup():
     global _last_tor_proc, _last_tmp_dir
     if _last_tor_proc:
         try:
             _last_tor_proc.terminate()
+            _last_tor_proc.wait(timeout=5)
         except Exception:
             pass
     if _last_tmp_dir and os.path.isdir(_last_tmp_dir):
@@ -71,7 +70,6 @@ for sig in (signal.SIGINT, signal.SIGTERM):
     except Exception:
         pass
 
-# Validation
 def strict_onion_v3_check(addr: str) -> bool:
     return bool(re.fullmatch(r"[a-z2-7]{56}\.onion", addr.strip().lower()))
 
@@ -111,7 +109,6 @@ def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     except Exception:
         return False
 
-# Framing
 def send_frame(sock: socket.socket, data: bytes) -> None:
     header = len(data).to_bytes(4, 'big')
     sock.sendall(header + data)
@@ -138,7 +135,6 @@ def recv_frames(sock: socket.socket, buffer: bytearray) -> Optional[List[bytes]]
         frames.append(frame)
     return frames
 
-# Tor helpers
 def start_tor_hidden_service(local_port: int):
     global _last_tmp_dir, _last_tor_proc
     tmp = tempfile.mkdtemp(prefix="convoisim_v2_")
@@ -190,7 +186,7 @@ def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) 
 
 def make_log_box(log_text: str) -> str:
     lines = log_text.splitlines()
-    width = max(len(line) for line in lines)
+    width = max(len(line) for line in lines) if lines else 0
     top = "┌" + "─" * (width + 2) + "┐"
     bottom = "└" + "─" * (width + 2) + "┘"
     boxed_lines = [top]
@@ -300,8 +296,7 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         wrap_lines=False,
     )
 
-    input_text_area.buffer.accept_handler = None
-
+    # Set accept handler on the buffer after creation for compatibility
     def accept_text(buff):
         nonlocal stop, seq_send
         user_input = buff.text
@@ -368,8 +363,7 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     print("[Info] Chat session ended.")
 
-# Listener helper
-def _prebind_local_listener() -> Optional[Tuple[socket.socket, int]]:
+def _prebind_local_listener() -> Optional[tuple]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     port = None
@@ -386,7 +380,7 @@ def _prebind_local_listener() -> Optional[Tuple[socket.socket, int]]:
             listener.close()
         except Exception:
             pass
-        return None, None
+        return None
     listener.listen(1)
     return listener, port
 
