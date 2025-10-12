@@ -13,7 +13,7 @@ import signal
 import re
 import select
 import base64
-from typing import Optional, List
+from typing import Tuple,Optional, List
 import queue
 
 import socks  # PySocks
