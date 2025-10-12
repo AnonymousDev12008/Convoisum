@@ -13,7 +13,7 @@ import signal
 import re
 import select
 import base64
-from typing import Tuple,Optional, List
+from typing import Tuple, Optional, List
 import queue
 
 import socks  # PySocks
@@ -40,10 +40,11 @@ from prompt_toolkit import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
+from prompt_toolkit.buffer import Buffer
 
 DEBUG = False
 USE_CLIPBOARD = False  # Default off for safety
@@ -184,17 +185,6 @@ ClientOnly 1
 def build_transcript(host_der: bytes, client_der: bytes, onion: str, port: int) -> bytes:
     return host_der + client_der + onion.encode() + port.to_bytes(2, "big")
 
-def make_log_box(log_text: str) -> str:
-    lines = log_text.splitlines()
-    width = max(len(line) for line in lines) if lines else 0
-    top = "┌" + "─" * (width + 2) + "┐"
-    bottom = "└" + "─" * (width + 2) + "┘"
-    boxed_lines = [top]
-    for line in lines:
-        boxed_lines.append("│ " + line.ljust(width) + " │")
-    boxed_lines.append(bottom)
-    return "\n".join(boxed_lines)
-
 def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: SecureNonceCounter):
     stop = threading.Event()
     seq_send = 0
@@ -282,13 +272,8 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
                     stop.set()
                     return
 
-                peer_block = f"<peer>Peer: {msg}</peer>"
-                log_text = f"Seq: {seq_recv}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct).decode()}"
-                log_box = make_log_box(log_text)
-                colored_log_box = f"<log>{log_box}</log>"
-
+                peer_block = f"Peer: {msg}"
                 message_queue.put((peer_block, 'peerblock'))
-                message_queue.put((colored_log_box, 'logblock'))
 
                 if msg.strip().lower() == "exit":
                     message_queue.put(('[Peer exited the chat]', 'info'))
@@ -299,27 +284,9 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     threading.Thread(target=recv_loop, daemon=True).start()
 
-    def get_chat_text():
-        result = []
-        for m, typ in chat_messages:
-            if typ == 'peerblock':
-                result.append(('class:peer', m))
-            elif typ == 'userblock':
-                result.append(('class:user', m))
-            elif typ == 'logblock':
-                result.append(('class:log', m))
-            elif typ == 'info':
-                result.append(('class:info', m))
-            elif typ == 'error':
-                result.append(('class:error', m))
-            else:
-                result.append(('', m))
-            result.append(('', "\n"))
-        return result
-
-    chat_text_control = FormattedTextControl(get_chat_text, focusable=False)
+    chat_buffer = Buffer(read_only=True)
     chat_window = Window(
-        content=chat_text_control,
+        content=BufferControl(buffer=chat_buffer),
         wrap_lines=True,
         right_margins=[ScrollbarMargin()]
     )
@@ -345,17 +312,10 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
             return
 
         ct = encrypt_message(session_key, user_input, nonce_ctr, seq_send)
-        nonce = ct[:12]
-        ct_payload = ct[12:]
         send_frame(sock, ct)
 
         user_block = f"You: {user_input}"
-        log_text = f"Seq: {seq_send}\nNonce: {nonce.hex()}\nPayload (b64): {base64.b64encode(ct_payload).decode()}"
-        log_box = make_log_box(log_text)
-        colored_log_box = f"<log>{log_box}</log>"
-
         message_queue.put((user_block, 'userblock'))
-        message_queue.put((colored_log_box, 'logblock'))
 
         seq_send += 1
         buff.text = ''
@@ -379,12 +339,17 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         nonlocal user_scrolled_up
         while not stop.is_set():
             try:
-                msg = message_queue.get(timeout=0.5)
-                chat_messages.append(msg)
+                msg, typ = message_queue.get(timeout=0.5)
+                chat_messages.append((msg, typ))
+
+                # Update chat_buffer content from chat_messages
+                chat_text = ""
+                for m, t in chat_messages:
+                    chat_text += m + "\n"
+                chat_buffer.text = chat_text
 
                 if chat_window.render_info:
-                    max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
-                    # Auto-scroll only if user is not scrolled up or already at bottom
+                    max_scroll = max(0, len(chat_buffer.document.lines) - chat_window.render_info.window_height)
                     if not user_scrolled_up or chat_window.vertical_scroll >= max_scroll:
                         chat_window.vertical_scroll = max_scroll
 
@@ -406,7 +371,8 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
 
     print("[Info] Chat session ended.")
 
-def _prebind_local_listener() -> Optional[tuple]:
+
+def _prebind_local_listener() -> Optional[Tuple[socket.socket, int]]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     port = None
@@ -426,6 +392,7 @@ def _prebind_local_listener() -> Optional[tuple]:
         return None
     listener.listen(1)
     return listener, port
+
 
 def run_host():
     print("\n=== Host Mode (Convoisum-v2) ===\n")
@@ -533,6 +500,7 @@ def run_host():
             pass
 
     handle_chat(conn, session_key, nonce_ctr)
+
 
 def run_client():
     print("\n=== Client Mode (Convoisum-v2) ===\n")
@@ -649,6 +617,7 @@ def run_client():
         return
     if not stop:
         handle_chat(s, session_key, nonce_ctr)
+
 
 def main_menu():
     while True:
