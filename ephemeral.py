@@ -202,6 +202,7 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
     recv_buffer = bytearray()
     message_queue = queue.Queue()
     chat_messages = []
+    user_scrolled_up = False  # Track if user manually scrolled up
 
     style = Style.from_dict({
         'peer': 'ansicyan',
@@ -218,6 +219,40 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
     def _(event):
         stop.set()
         event.app.exit()
+
+    @kb.add('up')
+    def _(event):
+        nonlocal user_scrolled_up
+        if chat_window.vertical_scroll > 0:
+            chat_window.vertical_scroll -= 1
+            user_scrolled_up = True
+
+    @kb.add('down')
+    def _(event):
+        nonlocal user_scrolled_up
+        if not chat_window.render_info:
+            return
+        max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
+        if chat_window.vertical_scroll < max_scroll:
+            chat_window.vertical_scroll += 1
+            if chat_window.vertical_scroll == max_scroll:
+                user_scrolled_up = False
+
+    @kb.add('pageup')
+    def _(event):
+        nonlocal user_scrolled_up
+        chat_window.vertical_scroll = max(0, chat_window.vertical_scroll - 10)
+        user_scrolled_up = True
+
+    @kb.add('pagedown')
+    def _(event):
+        nonlocal user_scrolled_up
+        if not chat_window.render_info:
+            return
+        max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
+        chat_window.vertical_scroll = min(max_scroll, chat_window.vertical_scroll + 10)
+        if chat_window.vertical_scroll == max_scroll:
+            user_scrolled_up = False
 
     def recv_loop():
         nonlocal seq_recv
@@ -296,7 +331,6 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         wrap_lines=False,
     )
 
-    # Set accept handler on the buffer after creation for compatibility
     def accept_text(buff):
         nonlocal stop, seq_send
         user_input = buff.text
@@ -342,10 +376,19 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
     )
 
     def message_consumer():
+        nonlocal user_scrolled_up
         while not stop.is_set():
             try:
                 msg = message_queue.get(timeout=0.5)
                 chat_messages.append(msg)
+
+                if chat_window.render_info:
+                    max_scroll = max(0, len(chat_messages) - chat_window.render_info.window_height)
+                    # Auto-scroll only if user is not scrolled up or already at bottom
+                    if not user_scrolled_up or chat_window.vertical_scroll >= max_scroll:
+                        chat_window.vertical_scroll = max_scroll
+
+                application.invalidate()
             except queue.Empty:
                 continue
 
