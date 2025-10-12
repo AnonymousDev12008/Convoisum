@@ -369,9 +369,11 @@ def handle_chat(sock: socket.socket, session_key: SecureBytes, nonce_ctr: Secure
         key_bindings=kb,
         style=style,
         full_screen=True,
-        refresh_interval=0.2,
-        focus_element=input_text_area  # Ensure input area has focus
+        refresh_interval=0.2
     )
+
+    # Set focus to input area after creation
+    application.layout.focus(input_text_area)
 
     def message_consumer():
         nonlocal user_scrolled_up
