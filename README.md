@@ -174,7 +174,9 @@ Main menu:
 
 ### Chat Controls
 - Type a message and press Enter to send
-- Type exit to end the session
+- Added layer of verbosity shows the payload ,   sequence number and encrypted payload.
+- Type exit to end the session.
+- once user prompts for exit confirm that as an indicator for exit and prompt for exit on your side too.
 - Type cancel during prompts to abort
 - Messages are limited to 512 characters
 
