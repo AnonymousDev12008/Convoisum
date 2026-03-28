@@ -421,8 +421,12 @@ def run_host():
     threading.Thread(target=cancel_monitor, daemon=True).start()
 
     try:
+        lstn.settimeout(120)
         conn, _ = lstn.accept()
         print("[Info] Peer connected. Starting chat session.\n")
+    except socket.timeout:
+        print("[Info] No peer Connected within 2 minutes. Returning to the menu.\n")
+        return
     except Exception:
         if stop_flag.is_set():
             return
