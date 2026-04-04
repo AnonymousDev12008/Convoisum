@@ -142,6 +142,7 @@ def derive_shared_key_with_context(private_key, peer_public_key, session_context
 
 
 # 256-entry SAS word list: keep stable; ASCII lowercase; avoid homophones.
+
 SAS_WORDS = [
     "able","acid","aged","also","area","army","away","baby",
     "back","bake","ball","band","bank","base","bath","bear",

@@ -277,10 +277,10 @@ def handle_chat(sock, session_key, nonce_ctr):
             app.layout.focus(input_area)
             return
         if txt.lower() == "yes" and "[System] Are you sure" in chat_area.text:
-            ct=encrypt_message(session_key, "exit", nounce_ctr, seq_send)
+            ct=encrypt_message(session_key, "exit", nonce_ctr, seq_send)
             send_frame(sock, ct)
             stop.set()
-            get_app.exit()
+            get_app().exit()
             return
         if txt.lower() == "no" and "[System] Are you sure" in chat_area.text:
             queue_msgs.put("[System] Exit cancelled. You can continue chatting. ")
