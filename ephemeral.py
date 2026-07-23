@@ -131,7 +131,7 @@ def recv_frames(sock: socket.socket, buffer: bytearray):
 
 def start_tor_hidden_service(local_port: int):
     global _last_tmp_dir, _last_tor_proc
-    tmp = tempfile.mkdtemp(prefix="convoisim_v2_")
+    tmp = tempfile.mkdtemp(prefix="convoisum_v2_")
     os.chmod(tmp, 0o700)
     _last_tmp_dir = tmp
     hs = os.path.join(tmp, "hs")
