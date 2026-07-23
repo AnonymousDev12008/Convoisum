@@ -1,4 +1,4 @@
-# Convoisim-v2 crypto_core.py
+# Convoisum-v2 crypto_core.py
 
 import os
 import threading
@@ -129,12 +129,12 @@ def derive_shared_key_with_context(private_key, peer_public_key, session_context
     shared_secret = private_key.exchange(ec.ECDH(), peer_public_key)
     secret_buf = SecureBytes(shared_secret)
     try:
-        salt = _salt_from_transcript(b"convoisim-v2-session-salt", session_context)
+        salt = _salt_from_transcript(b"convoisum-v2-session-salt", session_context)
         derived = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            info=b"convoisim-v2-session|" + session_context
+            info=b"convoisum-v2-session|" + session_context
         ).derive(secret_buf.bytes())
         return SecureBytes(derived)
     finally:
@@ -214,12 +214,12 @@ def derive_sas(session_key: SecureBytes, transcript: bytes) -> str:
     """
     Derive 6-word SAS (~48 bits) from a 256-word list with transcript-bound salt.
     """
-    salt = _salt_from_transcript(b"convoisim-v2-sas-salt", transcript)
+    salt = _salt_from_transcript(b"convoisum-v2-sas-salt", transcript)
     sas_material = HKDF(
         algorithm=hashes.SHA256(),
         length=6,
         salt=salt,
-        info=b"convoisim-v2-sas"
+        info=b"convoisum-v2-sas"
     ).derive(session_key.bytes() + transcript)
     indices = list(sas_material)  # 6 bytes -> 6 indices 0..255
     return "-".join(SAS_WORDS[i] for i in indices)
